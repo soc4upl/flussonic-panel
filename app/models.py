@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+STREAM_NAME_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class InputItem(BaseModel):
+    url: str = Field(min_length=3, max_length=4096)
+
+    @field_validator("url")
+    @classmethod
+    def clean_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Input URL cannot be empty")
+        if any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Input URL contains forbidden characters")
+        return value
+
+
+class TargetedRequest(BaseModel):
+    target_ids: list[str] | None = None
+
+
+class InputsUpdate(TargetedRequest):
+    inputs: list[InputItem] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def unique_inputs(self) -> "InputsUpdate":
+        urls = [item.url for item in self.inputs]
+        if len(urls) != len(set(urls)):
+            raise ValueError("Duplicate input URLs are not allowed")
+        return self
+
+
+class StreamCreate(TargetedRequest):
+    name: str = Field(min_length=1, max_length=255)
+    title: str = Field(default="", max_length=500)
+    provider: str = Field(default="CYRIUSTV", max_length=255)
+    on_play: str | None = Field(default="auth://NewAuthBackend1", max_length=2048)
+    static: bool = False
+    position: int | None = Field(default=None, ge=0)
+    inputs: list[InputItem] = Field(min_length=1, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        value = value.strip()
+        if not STREAM_NAME_RE.fullmatch(value):
+            raise ValueError("Use only letters, digits, _, -, / and . in stream name")
+        return value
+
+    @model_validator(mode="after")
+    def unique_inputs(self) -> "StreamCreate":
+        urls = [item.url for item in self.inputs]
+        if len(urls) != len(set(urls)):
+            raise ValueError("Duplicate input URLs are not allowed")
+        return self
+
+
+class StreamPatch(TargetedRequest):
+    title: str | None = Field(default=None, max_length=500)
+    provider: str | None = Field(default=None, max_length=255)
+    on_play: str | None = Field(default=None, max_length=2048)
+    static: bool | None = None
+    position: int | None = Field(default=None, ge=0)
+    inputs: list[InputItem] | None = Field(default=None, min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def unique_inputs(self) -> "StreamPatch":
+        if self.inputs is None:
+            return self
+        urls = [item.url for item in self.inputs]
+        if len(urls) != len(set(urls)):
+            raise ValueError("Duplicate input URLs are not allowed")
+        return self
+
+
+class ReorderItem(BaseModel):
+    name: str
+    position: int = Field(ge=0)
+
+
+class ReorderRequest(TargetedRequest):
+    streams: list[ReorderItem] = Field(min_length=1, max_length=10000)
+
+
+class SyncRequest(TargetedRequest):
+    source_id: str | None = None
+
+
+class ApiResult(BaseModel):
+    ok: bool
+    data: Any | None = None
+    error: str | None = None
+
+
+class ServerCreate(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=8, max_length=2048)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
+    primary: bool = False
+    enabled: bool = True
+    verify_tls: bool = True
+    node_exporter_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("id")
+    @classmethod
+    def clean_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError("Server ID may contain letters, digits, _, - and .")
+        return value or None
+
+    @field_validator("node_exporter_url")
+    @classmethod
+    def clean_node_exporter_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().rstrip("/")
+        if not value:
+            return None
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("Node Exporter URL must start with http:// or https://")
+        if any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Node Exporter URL contains invalid characters")
+        return value
+
+    @field_validator("name", "username", "password")
+    @classmethod
+    def clean_server_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Field contains invalid characters")
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def clean_server_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("URL must start with http:// or https://")
+        if any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("URL contains invalid characters")
+        return value
+
+
+class ServerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    url: str | None = Field(default=None, min_length=8, max_length=2048)
+    username: str | None = Field(default=None, min_length=1, max_length=255)
+    password: str | None = Field(default=None, max_length=1024)
+    primary: bool | None = None
+    enabled: bool | None = None
+    verify_tls: bool | None = None
+    node_exporter_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("node_exporter_url")
+    @classmethod
+    def clean_optional_node_exporter_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().rstrip("/")
+        if not value:
+            return ""
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("Node Exporter URL must start with http:// or https://")
+        if any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Node Exporter URL contains invalid characters")
+        return value
+
+    @field_validator("name", "username")
+    @classmethod
+    def clean_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Field contains invalid characters")
+        return value
+
+    @field_validator("password")
+    @classmethod
+    def clean_optional_password(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Password contains invalid characters")
+        return value or None
+
+    @field_validator("url")
+    @classmethod
+    def clean_optional_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().rstrip("/")
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("URL must start with http:// or https://")
+        return value
+
+
+class ServerTestRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=1024)
+    verify_tls: bool = True
+    node_exporter_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("node_exporter_url")
+    @classmethod
+    def clean_test_node_exporter_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().rstrip("/")
+        if not value:
+            return None
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("Node Exporter URL must start with http:// or https://")
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def clean_test_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not re.match(r"^https?://", value, flags=re.IGNORECASE):
+            raise ValueError("URL must start with http:// or https://")
+        return value
+
+class BulkOperationRequest(TargetedRequest):
+    names: list[str] = Field(min_length=1, max_length=500)
+    operation: str
+    value: str | bool | None = None
+    source_id: str | None = None
+
+    @field_validator("operation")
+    @classmethod
+    def valid_operation(cls, value: str) -> str:
+        allowed = {"add_input", "set_provider", "set_on_play", "set_static", "delete", "sync"}
+        if value not in allowed:
+            raise ValueError("Unsupported bulk operation")
+        return value
+
+
+class SourceActionRequest(BaseModel):
+    server_id: str = Field(min_length=1, max_length=64)
+    stream_name: str = Field(min_length=1, max_length=255)
+    input_url: str | None = Field(default=None, max_length=4096)
+    action: str
+    new_input: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("action")
+    @classmethod
+    def valid_source_action(cls, value: str) -> str:
+        allowed = {"disable_stream", "enable_stream", "add_input", "remove_input", "promote_input"}
+        if value not in allowed:
+            raise ValueError("Unsupported source action")
+        return value
+
+    @field_validator("input_url", "new_input")
+    @classmethod
+    def clean_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("Input URL contains invalid characters")
+        return value
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> "SourceActionRequest":
+        if self.action in {"remove_input", "promote_input"} and not self.input_url:
+            raise ValueError("input_url is required")
+        if self.action == "add_input" and not self.new_input:
+            raise ValueError("new_input is required")
+        return self
+
+
+class NotificationSettingsUpdate(BaseModel):
+    enabled: bool = False
+    telegram_chat_id: str = ""
+    telegram_bot_token: str | None = None
+    webhook_url: str | None = None
+    clear_telegram: bool = False
+    clear_webhook: bool = False
+    events: list[str] = Field(default_factory=lambda: ["source_failed", "server_offline", "sync_drift", "server_load"])
+
+
+class NotificationTestRequest(BaseModel):
+    message: str = "Тестовое уведомление Cyrius Stream Control"

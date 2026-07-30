@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <title>Cyrius Stream Control</title>
+  <link rel="stylesheet" href="/static/styles.css?v=57">
+</head>
+<body>
+  <div id="toast-root" class="toast-root"></div>
+
+  <section id="login-view" class="login-shell hidden">
+    <div class="login-orb orb-one"></div>
+    <div class="login-orb orb-two"></div>
+    <form id="login-form" class="login-card">
+      <div class="brand-mark large">C</div>
+      <p class="eyebrow">FLUSSONIC CONTROL</p>
+      <h1>Добро пожаловать</h1>
+      <p class="muted">Управляйте потоками и источниками на всех серверах из одного окна.</p>
+      <label class="field">
+        <span>Логин</span>
+        <input id="login-user" autocomplete="username" required value="admin">
+      </label>
+      <label class="field">
+        <span>Пароль</span>
+        <input id="login-password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn primary wide" type="submit">
+        <span>Войти в панель</span><span aria-hidden="true">→</span>
+      </button>
+      <p id="login-error" class="form-error"></p>
+    </form>
+  </section>
+
+  <div id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">C</div>
+        <div><strong>Cyrius</strong><span>Stream Control</span></div>
+      </div>
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="streams"><span class="nav-icon">◫</span>Потоки</button>
+        <button class="nav-item" data-view="servers"><span class="nav-icon">◉</span>Серверы</button>
+        <button class="nav-item" data-view="monitor"><span class="nav-icon">⌁</span>Мониторинг</button>
+        <button class="nav-item" data-view="load"><span class="nav-icon">◒</span>Нагрузка</button>
+        <button class="nav-item" data-view="sync"><span class="nav-icon">◎</span>Синхронизация</button>
+        <button class="nav-item" data-view="sources"><span class="nav-icon">⚡</span>Источники</button>
+        <button class="nav-item" data-view="backups"><span class="nav-icon">↶</span>Резервные копии</button>
+        <button class="nav-item" data-view="audit"><span class="nav-icon">≡</span>История</button>
+        <button class="nav-item" data-view="alerts"><span class="nav-icon">♢</span>Уведомления</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="mini-profile">
+          <div class="avatar">A</div>
+          <div><strong id="profile-user">admin</strong><span>Администратор</span></div>
+        </div>
+        <button id="logout-btn" class="icon-btn" title="Выйти">↪</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="mobile-menu" class="icon-btn mobile-only">☰</button>
+        <div>
+          <p class="eyebrow">ЦЕНТР УПРАВЛЕНИЯ</p>
+          <h1 id="page-title">Потоки</h1>
+        </div>
+        <div class="top-actions">
+          <div id="last-refresh" class="last-refresh">Ещё не обновлялось</div>
+          <button id="refresh-btn" class="btn ghost">↻ Обновить</button>
+          <button id="add-stream-btn" class="btn primary">＋ Добавить поток</button>
+        </div>
+      </header>
+
+      <section id="streams-view" class="view-section">
+        <div id="metric-grid" class="metric-grid">
+          <article class="metric-card"><span class="metric-label">Всего потоков</span><strong id="metric-total">—</strong><span class="metric-foot">на выбранном сервере</span></article>
+          <article class="metric-card"><span class="metric-label">Активны</span><strong id="metric-alive">—</strong><span class="metric-foot success">работают сейчас</span></article>
+          <article class="metric-card"><span class="metric-label">Запущены</span><strong id="metric-running">—</strong><span class="metric-foot">running = true</span></article>
+          <article class="metric-card"><span class="metric-label">Серверы онлайн</span><strong id="metric-servers">—</strong><span class="metric-foot" id="metric-servers-foot">проверка...</span></article>
+        </div>
+
+        <section class="panel table-panel">
+          <div class="panel-head">
+            <div class="toolbar-left">
+              <label class="search-box"><span>⌕</span><input id="search-input" placeholder="Поиск по имени, title, provider или URL"></label>
+              <select id="server-select" class="select"></select>
+              <select id="status-filter" class="select">
+                <option value="all">Все статусы</option>
+                <option value="alive">Только активные</option>
+                <option value="waiting">Ожидающие</option>
+                <option value="offline">Неактивные</option>
+              </select>
+            </div>
+            <div class="toolbar-right"><button id="bulk-open-btn" class="btn ghost small" disabled>Массовые операции</button><span id="stream-count" class="soft-badge">0 потоков</span></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th class="check-col"><input id="select-all-streams" type="checkbox"></th><th class="drag-col"></th><th>Поток</th><th>Источники</th><th>Статус</th><th>Позиция</th><th class="actions-col"></th></tr></thead>
+              <tbody id="streams-body"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state hidden">
+              <div class="empty-icon">◫</div><h3>Потоки не найдены</h3><p>Измените фильтры или добавьте новый поток.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="servers-view" class="view-section hidden">
+        <div class="section-intro server-intro">
+          <div><h2>Flussonic-серверы</h2><p>Добавляйте серверы, проверяйте API и назначайте основной узел прямо из панели.</p></div>
+          <button id="add-server-btn" class="btn primary">＋ Добавить сервер</button>
+        </div>
+        <div id="server-grid" class="server-grid"></div>
+        <div id="server-empty" class="empty-state server-empty hidden">
+          <div class="empty-icon">◉</div><h3>Серверы ещё не добавлены</h3><p>Добавьте первый Flussonic-сервер, чтобы загрузить потоки.</p>
+          <button id="empty-add-server-btn" class="btn primary">＋ Добавить сервер</button>
+        </div>
+      </section>
+
+      <section id="monitor-view" class="view-section hidden">
+        <div class="monitor-heading">
+          <div>
+            <div class="live-title"><span id="monitor-live-dot" class="live-dot"></span><h2>Сессии в реальном времени</h2></div>
+            <p>Активные подключения, пользователи, IP-адреса и аптайм каналов на всех включённых серверах.</p>
+          </div>
+          <div class="monitor-poll"><span>Опрос</span><strong id="monitor-poll-seconds">—</strong></div>
+        </div>
+
+        <div class="metric-grid monitor-metrics">
+          <article class="metric-card"><span class="metric-label">Активные сессии</span><strong id="monitor-metric-sessions">—</strong><span class="metric-foot success">сейчас на всех серверах</span></article>
+          <article class="metric-card"><span class="metric-label">Пользователи</span><strong id="monitor-metric-logins">—</strong><span class="metric-foot">уникальные логины</span></article>
+          <article class="metric-card"><span class="metric-label">Уникальные IP</span><strong id="monitor-metric-ips">—</strong><span class="metric-foot">без Unknown</span></article>
+          <article class="metric-card"><span class="metric-label">Активные каналы</span><strong id="monitor-metric-streams">—</strong><span class="metric-foot">по наличию сессий</span></article>
+        </div>
+
+        <section class="panel monitor-chart-panel">
+          <div class="panel-head monitor-toolbar">
+            <div class="toolbar-left">
+              <label class="search-box"><span>⌕</span><input id="monitor-filter" placeholder="Фильтр по логину, каналу, IP или серверу"></label>
+            </div>
+            <div class="toolbar-right">
+              <div class="range-switch"><button class="range-btn active" data-range="live">Live</button><button class="range-btn" data-range="1h">1ч</button><button class="range-btn" data-range="24h">24ч</button><button class="range-btn" data-range="7d">7д</button><button class="range-btn" data-range="30d">30д</button></div><span id="monitor-connection" class="soft-badge">Подключение…</span>
+              <span id="monitor-chart-info" class="soft-badge">Нет данных</span>
+            </div>
+          </div>
+          <div id="monitor-errors" class="monitor-errors hidden"></div>
+          <div class="chart-shell"><canvas id="monitor-chart"></canvas></div>
+          <div id="monitor-legend" class="chart-legend"></div>
+        </section>
+
+        <div class="monitor-grid">
+          <section class="panel monitor-table-card">
+            <div class="panel-head"><div><p class="eyebrow">ПО ПОЛЬЗОВАТЕЛЮ</p><h3>Итог по логину</h3></div><span id="monitor-totals-count" class="soft-badge">0</span></div>
+            <div class="table-wrap monitor-table-wrap">
+              <table><thead><tr><th>Логин</th><th>Сессии</th><th>IP</th><th>Серверы</th><th>#</th></tr></thead><tbody id="monitor-totals-body"></tbody></table>
+            </div>
+          </section>
+
+          <section class="panel monitor-table-card">
+            <div class="panel-head"><div><p class="eyebrow">РАСПРЕДЕЛЕНИЕ</p><h3>По серверам</h3></div><span id="monitor-per-count" class="soft-badge">0</span></div>
+            <div class="table-wrap monitor-table-wrap">
+              <table><thead><tr><th>Логин</th><th>Сервер</th><th>Сессии</th><th>IP</th><th>Адреса</th></tr></thead><tbody id="monitor-per-body"></tbody></table>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel monitor-table-card monitor-full-table">
+          <div class="panel-head">
+            <div><p class="eyebrow">АПТАЙМ ПО АКТИВНОСТИ</p><h3>Каналы с активными сессиями</h3></div>
+            <span id="monitor-uptime-count" class="soft-badge">0</span>
+          </div>
+          <div class="table-wrap monitor-table-wrap">
+            <table><thead><tr><th>Сервер</th><th>Канал</th><th>Сессии</th><th>Аптайм</th><th>Первое появление</th></tr></thead><tbody id="monitor-uptime-body"></tbody></table>
+          </div>
+        </section>
+
+        <section class="panel monitor-table-card monitor-full-table">
+          <div class="panel-head monitor-sessions-head">
+            <div><p class="eyebrow">LIVE CONNECTIONS</p><h3>Активные сессии</h3></div>
+            <div class="monitor-sort">
+              <span>Сортировка:</span>
+              <button class="monitor-sort-btn active" data-sort="server">сервер</button>
+              <button class="monitor-sort-btn" data-sort="login">логин</button>
+              <button class="monitor-sort-btn" data-sort="channel">канал</button>
+              <span id="monitor-sessions-count" class="soft-badge">0</span>
+            </div>
+          </div>
+          <div class="table-wrap monitor-table-wrap monitor-sessions-wrap">
+            <table><thead><tr><th>Канал</th><th>Логин</th><th>Сервер</th><th>IP</th></tr></thead><tbody id="monitor-sessions-body"></tbody></table>
+          </div>
+        </section>
+      </section>
+
+      <section id="load-view" class="view-section hidden">
+        <div class="monitor-heading">
+          <div>
+            <div class="live-title"><span id="load-live-dot" class="live-dot"></span><h2>Нагрузка Flussonic-серверов</h2></div>
+            <p>Системные метрики Linux через Node Exporter: CPU, RAM, диски, RX/TX по сетевым интерфейсам и load average. Данные Flussonic используются как резервный источник.</p>
+          </div>
+          <div class="monitor-poll"><span>Опрос</span><strong id="load-poll-seconds">—</strong></div>
+        </div>
+
+        <div class="metric-grid load-summary-grid">
+          <article class="metric-card"><span class="metric-label">Серверы онлайн</span><strong id="load-online">—</strong><span class="metric-foot">из включённых серверов</span></article>
+          <article class="metric-card"><span class="metric-label">Средний CPU</span><strong id="load-average-cpu">—</strong><span class="metric-foot">по доступным метрикам</span></article>
+          <article class="metric-card"><span class="metric-label">Средняя RAM</span><strong id="load-average-memory">—</strong><span class="metric-foot">по доступным метрикам</span></article>
+          <article class="metric-card"><span class="metric-label">RX сейчас</span><strong id="load-network-rx" class="load-live-value">—</strong><span id="load-network-rx-foot" class="metric-foot network-live-pulse">обновление каждую секунду</span></article>
+          <article class="metric-card"><span class="metric-label">TX сейчас</span><strong id="load-network-tx" class="load-live-value">—</strong><span id="load-network-tx-foot" class="metric-foot network-live-pulse">обновление каждую секунду</span></article>
+          <article class="metric-card"><span class="metric-label">Предупреждения</span><strong id="load-warnings">—</strong><span class="metric-foot" id="load-network-total">сеть —</span></article>
+        </div>
+
+        <section class="panel load-chart-panel">
+          <div class="panel-head load-toolbar">
+            <div class="toolbar-left">
+              <select id="load-server-select" class="select"><option value="all">Все серверы</option></select>
+              <select id="load-metric-select" class="select">
+                <option value="cpu_percent">CPU, %</option>
+                <option value="memory_percent">RAM, %</option>
+                <option value="disk_percent">Диск, %</option>
+                <option value="network" selected>Сеть RX+TX, Мбит/с</option>
+                <option value="network_rx_bps">Входящий RX, Мбит/с</option>
+                <option value="network_tx_bps">Исходящий TX, Мбит/с</option>
+                <option value="process_memory_bytes">Память Flussonic</option>
+                <option value="sessions">Сессии</option>
+              </select>
+            </div>
+            <div class="toolbar-right">
+              <div class="range-switch load-range-switch"><button class="load-range-btn active" data-range="live">Live</button><button class="load-range-btn" data-range="1h">1ч</button><button class="load-range-btn" data-range="24h">24ч</button><button class="load-range-btn" data-range="7d">7д</button><button class="load-range-btn" data-range="30d">30д</button></div>
+              <span id="load-connection" class="soft-badge">Подключение…</span>
+              <span id="load-chart-info" class="soft-badge">Нет данных</span>
+            </div>
+          </div>
+          <div id="load-errors" class="monitor-errors hidden"></div>
+          <div class="chart-shell"><canvas id="load-chart"></canvas></div>
+          <div id="load-legend" class="chart-legend"></div>
+        </section>
+
+        <div id="load-server-grid" class="load-server-grid"></div>
+
+        <section class="panel load-network-panel">
+          <div class="panel-head"><div><p class="eyebrow">NETWORK INTERFACES</p><h3>Сетевая нагрузка по интерфейсам</h3></div><span id="load-network-count" class="soft-badge">0</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Сервер</th><th>Интерфейс</th><th>Состояние</th><th>RX сейчас</th><th>TX сейчас</th><th>Получено всего</th><th>Отправлено всего</th></tr></thead><tbody id="load-network-body"></tbody></table></div>
+        </section>
+      </section>
+
+      <section id="sync-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Умная синхронизация</h2><p>Сравнение всех потоков с основным сервером, поиск отсутствующих и отличающихся конфигураций.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
+        <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sync-filter" placeholder="Поиск потока"></label><select id="sync-status-filter" class="select"><option value="all">Все</option><option value="drift">Только различия</option><option value="missing">Отсутствующие</option></select></div><div class="toolbar-right"><button id="sync-selected-btn" class="btn primary small" disabled>Синхронизировать выбранные</button><span id="sync-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th><input id="sync-select-all" type="checkbox"></th><th>Поток</th><th>Состояние</th><th>Серверы</th></tr></thead><tbody id="sync-body"></tbody></table></div></section>
+      </section>
+
+      <section id="sources-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Проверка источников</h2><p>Проверка HLS/HLSS, HTTP MPEG-TS (tshttp/tshttps) и доступности M4F. Для проблемного источника доступны быстрые действия с резервной копией.</p></div><button id="sources-run-btn" class="btn primary">▶ Проверить сейчас</button></div>
+        <div class="metric-grid"><article class="metric-card"><span class="metric-label">Проверено</span><strong id="sources-total">—</strong></article><article class="metric-card"><span class="metric-label">Работают</span><strong id="sources-ok">—</strong></article><article class="metric-card"><span class="metric-label">Ошибки</span><strong id="sources-failed">—</strong></article><article class="metric-card"><span class="metric-label">Интервал</span><strong id="sources-interval">—</strong></article></div>
+        <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sources-filter" placeholder="Поток, сервер или URL"></label><select id="sources-status-filter" class="select" aria-label="Фильтр состояния источников"><option value="all">Все источники</option><option value="failed">Только нерабочие</option><option value="healthy">Только рабочие</option><option value="unsupported">Не поддерживается проверкой</option></select></div><div class="toolbar-right"><span id="sources-problem-streams" class="soft-badge">Проблемных потоков: 0</span><span id="sources-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th>Сервер / поток</th><th>Input</th><th>Состояние</th><th>Задержка</th><th>Проверено</th><th>Действия</th></tr></thead><tbody id="sources-body"></tbody></table></div></section>
+      </section>
+
+      <section id="backups-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Резервные копии и откат</h2><p>Панель автоматически сохраняет конфигурацию перед изменением, удалением, синхронизацией и массовой операцией.</p></div><button id="backups-refresh-btn" class="btn ghost">↻ Обновить</button></div>
+        <section class="panel"><div class="panel-head"><label class="search-box"><span>⌕</span><input id="backups-filter" placeholder="Поиск потока или сервера"></label><span id="backups-count" class="soft-badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Время</th><th>Поток</th><th>Сервер</th><th>Причина</th><th>Hash</th><th></th></tr></thead><tbody id="backups-body"></tbody></table></div></section>
+      </section>
+
+      <section id="audit-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>История действий</h2><p>Кто, когда и что изменил в панели.</p></div><button id="audit-refresh-btn" class="btn ghost">↻ Обновить</button></div>
+        <section class="panel"><div class="panel-head"><label class="search-box"><span>⌕</span><input id="audit-filter" placeholder="Действие, поток, пользователь"></label><span id="audit-count" class="soft-badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Время</th><th>Пользователь</th><th>Действие</th><th>Объект</th><th>Результат</th><th>Описание</th></tr></thead><tbody id="audit-body"></tbody></table></div></section>
+      </section>
+
+      <section id="alerts-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Уведомления</h2><p>Telegram и webhook для ошибок источников, недоступности серверов, рассинхронизации и высокой нагрузки.</p></div></div>
+        <div class="settings-grid"><form id="alerts-form" class="panel settings-card"><div class="panel-head"><h3>Каналы доставки</h3></div><label class="switch-row"><input id="alerts-enabled" type="checkbox"><span class="switch"></span><span><strong>Уведомления включены</strong></span></label><label class="field"><span>Telegram Chat ID</span><input id="alerts-chat-id" placeholder="-1001234567890"></label><label class="field"><span>Telegram Bot Token</span><input id="alerts-token" type="password" placeholder="Оставьте пустым, чтобы не менять"></label><label class="field"><span>Webhook URL</span><input id="alerts-webhook" type="password" placeholder="https://..."></label><div class="event-checks"><label><input type="checkbox" value="source_failed" checked> Ошибка input</label><label><input type="checkbox" value="server_offline" checked> Сервер offline</label><label><input type="checkbox" value="sync_drift" checked> Рассинхронизация</label><label><input type="checkbox" value="server_load" checked> Высокая нагрузка</label></div><div class="modal-foot inline-foot"><button id="alerts-test-btn" type="button" class="btn ghost">Тест</button><button type="submit" class="btn primary">Сохранить</button></div></form><section class="panel settings-card"><div class="panel-head"><h3>Журнал доставки</h3><span id="alerts-count" class="soft-badge">0</span></div><div class="table-wrap compact-table"><table><thead><tr><th>Время</th><th>Событие</th><th>Сообщение</th><th>Доставка</th></tr></thead><tbody id="alerts-body"></tbody></table></div></section></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="server-dialog" class="modal">
+    <form id="server-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">FLUSSONIC SERVER</p><h2 id="server-modal-title">Новый сервер</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body form-grid">
+        <label class="field"><span>Название</span><input id="server-name" required placeholder="CDN 1"></label>
+        <label class="field"><span>ID сервера</span><input id="server-id" placeholder="Автоматически"><small>Необязательно. Латиница, цифры, _, - и .</small></label>
+        <label class="field full"><span>Адрес Flussonic</span><input id="server-url" required placeholder="http://cdn-1.example.com:8022"><small>Без пути /streamer/api — панель добавит его сама.</small></label>
+        <label class="field full"><span>Node Exporter URL</span><input id="server-node-exporter-url" placeholder="http://cdn-1.example.com:9100/metrics"><small>Можно оставить пустым: панель автоматически попробует http://HOST:9100/metrics.</small></label>
+        <label class="field"><span>API-логин</span><input id="server-username" required autocomplete="off" placeholder="panel_api"></label>
+        <label class="field"><span>API-пароль</span><input id="server-password" type="password" autocomplete="new-password" placeholder="Введите пароль"><small id="server-password-help">Пароль сохранится зашифрованным.</small></label>
+        <label class="switch-row"><input id="server-enabled" type="checkbox" checked><span class="switch"></span><span><strong>Сервер включён</strong><small>Использовать в операциях панели</small></span></label>
+        <label class="switch-row"><input id="server-primary" type="checkbox"><span class="switch"></span><span><strong>Основной сервер</strong><small>Источник для синхронизации</small></span></label>
+        <label class="switch-row full"><input id="server-verify-tls" type="checkbox" checked><span class="switch"></span><span><strong>Проверять TLS-сертификат</strong><small>Отключайте только для самоподписанного HTTPS-сертификата</small></span></label>
+        <div id="server-test-result" class="connection-result full hidden"></div>
+      </div>
+      <footer class="modal-foot"><button id="test-server-btn" type="button" class="btn ghost">Проверить подключение</button><span class="modal-spacer"></span><button type="button" class="btn ghost modal-close">Отмена</button><button id="server-submit" type="submit" class="btn primary">Добавить сервер</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="stream-dialog" class="modal">
+    <form id="stream-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ПОТОК</p><h2 id="stream-modal-title">Новый поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body form-grid">
+        <label class="field"><span>Системное имя</span><input id="stream-name" required placeholder="RTR_belarus"><small>Латиница, цифры, _, -, / и .</small></label>
+        <label class="field"><span>Название</span><input id="stream-title" placeholder="РТР Беларусь HD"></label>
+        <label class="field"><span>Provider</span><input id="stream-provider" value="CYRIUSTV"></label>
+        <label class="field"><span>On play auth</span><input id="stream-on-play" value="auth://NewAuthBackend1"></label>
+        <label class="field"><span>Позиция</span><input id="stream-position" type="number" min="0" placeholder="Автоматически"></label>
+        <label class="switch-row"><input id="stream-static" type="checkbox"><span class="switch"></span><span><strong>Постоянный поток</strong><small>Выключено = ondemand</small></span></label>
+        <div class="field full"><div class="field-title"><span>Источники input</span><button id="create-add-input" class="text-btn" type="button">＋ Добавить</button></div><div id="create-input-list" class="input-list"></div></div>
+        <div class="field full"><span>Сохранить на серверах</span><div id="create-targets" class="target-list"></div></div>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="stream-submit" type="submit" class="btn primary">Создать поток</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="inputs-dialog" class="modal wide-modal">
+    <form id="inputs-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ИСТОЧНИКИ</p><h2 id="inputs-modal-title">Редактирование input</h2><p id="inputs-stream-name" class="muted mono"></p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body">
+        <div class="callout"><span>↕</span><p>Перетаскивайте источники. Первый input имеет наивысший приоритет, следующие используются как резервные.</p></div>
+        <div class="field"><div class="field-title"><span>Список источников</span><button id="edit-add-input" class="text-btn" type="button">＋ Добавить input</button></div><div id="edit-input-list" class="input-list sortable"></div></div>
+        <div class="field"><span>Применить на серверах</span><div id="edit-targets" class="target-list"></div></div>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button type="submit" class="btn primary">Сохранить источники</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="compare-dialog" class="modal wide-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">СИНХРОНИЗАЦИЯ</p><h2 id="compare-title">Сравнение потока</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body"><div id="compare-summary" class="sync-banner"></div><div id="compare-list" class="compare-list"></div></div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Закрыть</button><button id="sync-stream-btn" class="btn primary" type="button">Синхронизировать с основного</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal compact-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow danger-text">ОПАСНОЕ ДЕЙСТВИЕ</p><h2>Удалить поток?</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body"><p id="confirm-text"></p><div id="delete-targets" class="target-list"></div></div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="confirm-delete-btn" class="btn danger" type="button">Удалить</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="bulk-dialog" class="modal"><form id="bulk-form" method="dialog" class="modal-card"><header class="modal-head"><div><p class="eyebrow">МАССОВЫЕ ОПЕРАЦИИ</p><h2>Изменить выбранные потоки</h2><p id="bulk-count-label" class="muted"></p></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body form-grid"><label class="field full"><span>Операция</span><select id="bulk-operation" class="select"><option value="add_input">Добавить резервный input</option><option value="set_provider">Изменить provider</option><option value="set_on_play">Изменить on_play</option><option value="set_static">Изменить static / ondemand</option><option value="sync">Синхронизировать с основного</option><option value="delete">Удалить потоки</option></select></label><label id="bulk-value-field" class="field full"><span>Значение</span><input id="bulk-value" placeholder="URL или новое значение"></label><div class="field full"><span>Применить на серверах</span><div id="bulk-targets" class="target-list"></div></div></div><footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button type="submit" class="btn primary">Выполнить</button></footer></form></dialog>
+
+  <dialog id="source-action-dialog" class="modal">
+    <form id="source-action-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ДЕЙСТВИЯ С ИСТОЧНИКОМ</p><h2 id="source-action-title">Поток</h2><p id="source-action-context" class="muted mono"></p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body form-grid">
+        <label class="field full"><span>Действие</span><select id="source-action-type" class="select">
+          <option value="add_input">Добавить новый резервный input</option>
+          <option value="promote_input">Сделать этот input основным</option>
+          <option value="remove_input">Удалить этот input</option>
+          <option value="disable_stream">Временно отключить поток</option>
+          <option value="enable_stream">Включить поток</option>
+        </select></label>
+        <label id="source-new-input-field" class="field full"><span>Новый input URL</span><input id="source-new-input" placeholder="hls://, tshttp://, m4f:// ..."><small>Новый источник добавится в конец списка как резервный.</small></label>
+        <div id="source-action-warning" class="callout full"><span>⚠</span><p>Перед изменением панель автоматически сохранит резервную копию конфигурации.</p></div>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="source-action-submit" type="submit" class="btn primary">Выполнить</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="preview-dialog" class="modal preview-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">LIVE PREVIEW</p><h2 id="preview-title">Просмотр канала</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><iframe id="preview-frame" class="preview-frame" allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe><div class="preview-links"><a id="preview-hls" target="_blank" rel="noopener">HLS</a><a id="preview-llhls" target="_blank" rel="noopener">LL-HLS</a></div><p class="muted small">Если поток защищён on_play-авторизацией, встроенный просмотр может потребовать пользовательский token.</p></div></div></dialog>
+
+  <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
+
+  <script src="/static/app.js?v=57" defer></script>
+</body>
+</html>

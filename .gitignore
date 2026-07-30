@@ -1,0 +1,29 @@
+# Секреты
+.env
+.env.*
+!.env.example
+
+# Данные панели
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+servers.json
+
+# Резервные копии
+backups/
+*.tar
+*.tar.gz
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Логи
+*.log
+*.tmp
