@@ -22,10 +22,12 @@ from .load_monitor import ServerLoadMonitor
 from .notifications import NotificationService
 from .source_monitor import SourceMonitor
 from .server_store import ServerStore, ServerStoreError
+from .cluster_store import ClusterStore, ClusterStoreError
 from .models import (
     InputsUpdate, LoginRequest, ReorderRequest, StreamCreate, StreamPatch, SyncRequest,
     ServerCreate, ServerUpdate, ServerTestRequest, BulkOperationRequest,
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
+    ClusterSettingsUpdate,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,6 +35,7 @@ STATIC_DIR = BASE_DIR / "static"
 settings = get_settings()
 client = FlussonicClient(settings)
 server_store = ServerStore(Path(settings.server_store_path), settings.secret_key, settings.servers)
+cluster_store = ClusterStore(Path(settings.cluster_store_path), settings.secret_key)
 data_store = DataStore(Path(settings.database_path))
 notifications = NotificationService(data_store, settings.secret_key)
 monitor = SessionsMonitor(settings, server_store, data_store)
@@ -48,7 +51,7 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.7.0", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.8.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -91,7 +94,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.7.0", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.8.0", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -209,6 +212,126 @@ async def test_server(payload: ServerTestRequest, _: Session = Depends(require_s
     )
     return {"ok": flussonic_result["online"], **flussonic_result, "node_exporter": exporter_result}
 
+
+def _parse_bitrate_limit(value: str | None) -> float | None:
+    if not value:
+        return None
+    raw = value.strip().upper()
+    multiplier = 1.0
+    if raw.endswith("K"):
+        multiplier, raw = 1_000.0, raw[:-1]
+    elif raw.endswith("M"):
+        multiplier, raw = 1_000_000.0, raw[:-1]
+    elif raw.endswith("G"):
+        multiplier, raw = 1_000_000_000.0, raw[:-1]
+    try:
+        return float(raw) * multiplier
+    except ValueError:
+        return None
+
+
+def _cluster_config_text(config: dict[str, Any]) -> str:
+    key = str(config.get("cluster_key") or "CHANGE_ME")
+    peers = config.get("peers") or []
+    lines = [f"cluster_key {key};", "", "# Remote sources:"]
+    for peer in peers:
+        lines.extend([f"peer {peer['host']} {{", "}"])
+    lines.extend(["", "# Balancer:", f"balancer {config.get('balancer_name') or 'lb01'} {{", f"  mode {config.get('mode') or 'clients'};"])
+    for peer in peers:
+        suffix = f" max_bitrate={peer.get('max_bitrate')}" if peer.get("max_bitrate") else ""
+        lines.append(f"  server {peer['host']}{suffix};")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/cluster/settings")
+async def cluster_settings(_: Session = Depends(require_session)) -> dict[str, Any]:
+    return {"settings": cluster_store.get(), "servers": [public_server(server) for server in server_store.all()]}
+
+
+@app.put("/api/cluster/settings")
+async def save_cluster_settings(payload: ClusterSettingsUpdate, session: Session = Depends(require_session)) -> dict[str, Any]:
+    known = {server.id for server in server_store.all()}
+    if payload.balancer_server_id and payload.balancer_server_id not in known:
+        raise HTTPException(400, "Balancer-сервер не найден")
+    unknown = [peer.server_id for peer in payload.peers if peer.server_id not in known]
+    if unknown:
+        raise HTTPException(400, f"Неизвестные peer server_id: {', '.join(unknown)}")
+    current = cluster_store.get()
+    if payload.enabled and not (payload.cluster_key or current.get("has_cluster_key")):
+        raise HTTPException(400, "Укажите cluster_key")
+    try:
+        saved = cluster_store.update(payload.model_dump(exclude_none=True))
+    except ClusterStoreError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    data_store.audit(actor=session.username, action="cluster_settings", entity_type="cluster", entity_id=payload.balancer_name, server_id=payload.balancer_server_id, status="success", summary=f"Сохранены настройки Cluster: {len(payload.peers)} peer")
+    return {"ok": True, "settings": saved}
+
+
+@app.get("/api/cluster/config")
+async def cluster_config(_: Session = Depends(require_session)) -> dict[str, Any]:
+    config = cluster_store.get(include_secret=True)
+    return {"config": _cluster_config_text(config), "has_cluster_key": bool(config.get("cluster_key"))}
+
+
+@app.get("/api/cluster/overview")
+async def cluster_overview(refresh: bool = Query(False), _: Session = Depends(require_session)) -> dict[str, Any]:
+    config = cluster_store.get()
+    load = await load_monitor.refresh_now() if refresh else load_monitor.snapshot()
+    load_by_id = {str(item.get("server_id")): item for item in (load.get("servers") or [])}
+    session_by_id = {str(item.get("server_id")): item for item in (monitor.snapshot().get("server_counts") or [])}
+    rows = []
+    total_clients = total_streams = 0
+    total_output = 0.0
+    for peer in config.get("peers") or []:
+        server = server_store.get(str(peer.get("server_id") or ""))
+        metrics = load_by_id.get(str(peer.get("server_id") or ""), {})
+        sessions = session_by_id.get(str(peer.get("server_id") or ""), {})
+        clients = int(sessions.get("sessions") or metrics.get("sessions") or 0)
+        streams = int(metrics.get("streams") or metrics.get("alive_streams") or 0)
+        output_bps = float(metrics.get("output_bandwidth_bps") or 0)
+        mode = config.get("mode") or "clients"
+        if mode == "bitrate":
+            load_value = output_bps / 1000.0
+            load_unit = "kbps"
+        elif mode == "usage":
+            limit = _parse_bitrate_limit(peer.get("max_bitrate"))
+            load_value = 100.0 * output_bps / limit if limit else None
+            load_unit = "%"
+        elif mode == "streams":
+            load_value = float(streams)
+            load_unit = "streams"
+        else:
+            load_value = float(clients)
+            load_unit = "clients"
+        rows.append({
+            "server_id": peer.get("server_id"), "host": peer.get("host"),
+            "server_name": server.name if server else peer.get("server_id"),
+            "online": bool(metrics.get("online")) and bool(sessions.get("online", True)),
+            "cpu_percent": metrics.get("cpu_percent"), "memory_percent": metrics.get("memory_percent"),
+            "clients": clients, "streams": streams, "output_bitrate_kbps": round(output_bps / 1000.0, 1),
+            "load": round(load_value, 1) if load_value is not None else None, "load_unit": load_unit,
+            "load1": metrics.get("load1"), "uptime_seconds": metrics.get("uptime_seconds"),
+            "state": metrics.get("state") or ("offline" if not metrics.get("online") else "limited"),
+            "source": metrics.get("source"), "error": metrics.get("error"),
+        })
+        total_clients += clients; total_streams += streams; total_output += output_bps
+    balancer_id = config.get("balancer_server_id")
+    balancer_metrics = load_by_id.get(str(balancer_id or ""), {})
+    loads = [float(row["load"]) for row in rows if row.get("load") is not None]
+    return {
+        "ts": int(time.time()), "poll_seconds": settings.cluster_poll_seconds,
+        "settings": config,
+        "balancer": {
+            "server_id": balancer_id,
+            "server_name": server_store.get(str(balancer_id)).name if balancer_id and server_store.get(str(balancer_id)) else None,
+            "online": bool(balancer_metrics.get("online")), "state": balancer_metrics.get("state"),
+        },
+        "summary": {"nodes": len(rows), "online": sum(bool(row["online"]) for row in rows), "clients": total_clients, "streams": total_streams, "output_bitrate_kbps": round(total_output / 1000.0, 1), "average_load": round(sum(loads) / len(loads), 1) if loads else None},
+        "nodes": rows,
+    }
+
+
 @app.get("/api/streams")
 async def streams(server_id: str | None = None, search: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
     server=get_server(server_id)
@@ -307,7 +430,8 @@ async def sync_overview(_:Session=Depends(require_session))->dict[str,Any]:
         base=maps.get(primary.id,{}).get(name); base_hash=client.config_hash(base) if base else None; states=[]
         for s in servers:
             cfg=maps[s.id].get(name); h=client.config_hash(cfg) if cfg else None
-            states.append({"server_id":s.id,"server_name":s.name,"present":bool(cfg),"hash":h,"matches_primary":bool(cfg and base and h==base_hash),"error":errors.get(s.id)})
+            differences=client.config_diff(base,cfg) if cfg and base else (["missing"] if base and not cfg else [])
+            states.append({"server_id":s.id,"server_name":s.name,"present":bool(cfg),"hash":h,"matches_primary":bool(cfg and base and h==base_hash),"differences":differences,"error":errors.get(s.id)})
         items.append({"name":name,"primary_present":bool(base),"in_sync":bool(base) and all(x["matches_primary"] for x in states),"states":states})
     drift_count=sum(1 for item in items if not item["in_sync"])
     if drift_count:

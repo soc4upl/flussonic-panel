@@ -70,6 +70,8 @@ class Settings:
     server_load_memory_warning: float
     server_load_disk_warning: float
     runtime_metrics_paths: tuple[str, ...]
+    cluster_store_path: str
+    cluster_poll_seconds: float
 
     @property
     def enabled_servers(self) -> tuple[FlussonicServer, ...]:
@@ -134,6 +136,8 @@ def get_settings() -> Settings:
         server_load_cpu_warning=max(1.0, min(100.0, float(os.getenv("SERVER_LOAD_CPU_WARNING", "85")))),
         server_load_memory_warning=max(1.0, min(100.0, float(os.getenv("SERVER_LOAD_MEMORY_WARNING", "85")))),
         server_load_disk_warning=max(1.0, min(100.0, float(os.getenv("SERVER_LOAD_DISK_WARNING", "90")))),
+        cluster_store_path=os.getenv("PANEL_CLUSTER_STORE", "/app/data/cluster.json"),
+        cluster_poll_seconds=max(5.0, float(os.getenv("CLUSTER_POLL_SECONDS", "15"))),
         runtime_metrics_paths=tuple(
             item.strip() for item in os.getenv(
                 "FLUSSONIC_RUNTIME_METRICS_PATHS",

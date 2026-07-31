@@ -27,6 +27,9 @@ const state = {
   loadRange: 'live',
   loadMetric: 'network',
   loadServerId: 'all',
+  clusterPayload: null,
+  clusterSettings: null,
+  clusterTimer: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -1084,12 +1087,14 @@ function switchView(view) {
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
   $('#streams-view').classList.toggle('hidden', view !== 'streams');
   $('#servers-view').classList.toggle('hidden', view !== 'servers');
-  ['monitor','load','sync','sources','backups','audit','alerts'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
-  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
+  ['monitor','load','cluster','sync','sources','backups','audit','alerts'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
+  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
   $('#page-title').textContent = titles[view] || 'Панель';
   $('#add-stream-btn').classList.toggle('hidden', view !== 'streams');
+  if (view !== 'cluster') stopClusterMonitor();
   if (view === 'monitor') startMonitor();
   if (view === 'load') startLoadMonitor();
+  if (view === 'cluster') startClusterMonitor();
   if (view === 'sync') loadSyncOverview();
   if (view === 'sources') loadSourceChecks();
   if (view === 'backups') loadBackups();
@@ -1311,7 +1316,7 @@ function renderSyncOverview() {
   const q = ($('#sync-filter').value || '').toLowerCase(); const f = $('#sync-status-filter').value;
   const items = state.syncItems.filter(x => (!q || x.name.toLowerCase().includes(q)) && (f === 'all' || (f === 'drift' && !x.in_sync) || (f === 'missing' && x.states.some(s => !s.present))));
   $('#sync-count').textContent = `${items.length}`;
-  $('#sync-body').innerHTML = items.map(x => `<tr data-name="${escapeHtml(x.name)}"><td><input class="sync-row-check" type="checkbox"></td><td><strong>${escapeHtml(x.name)}</strong></td><td><span class="status-pill ${x.in_sync ? 'alive' : 'waiting'}">${x.in_sync ? 'Синхронно' : 'Различия'}</span></td><td><div class="sync-server-pills">${x.states.map(s => `<span class="mini-state ${s.matches_primary ? 'ok' : s.present ? 'warn' : 'bad'}">${escapeHtml(s.server_name)} · ${s.present ? (s.matches_primary ? 'OK' : 'другая') : 'нет'}</span>`).join('')}</div></td></tr>`).join('') || emptyRow(4);
+  $('#sync-body').innerHTML = items.map(x => `<tr data-name="${escapeHtml(x.name)}"><td><input class="sync-row-check" type="checkbox"></td><td><strong>${escapeHtml(x.name)}</strong></td><td><span class="status-pill ${x.in_sync ? 'alive' : 'waiting'}">${x.in_sync ? 'Синхронно' : 'Различия'}</span></td><td><div class="sync-server-pills">${x.states.map(s => `<span class="mini-state ${s.matches_primary ? 'ok' : s.present ? 'warn' : 'bad'}">${escapeHtml(s.server_name)} · ${s.present ? (s.matches_primary ? 'OK' : `другая${(s.differences||[]).length ? `: ${(s.differences||[]).join(', ')}` : ''}`) : 'нет'}</span>`).join('')}</div></td></tr>`).join('') || emptyRow(4);
   $$('.sync-row-check').forEach(c => c.addEventListener('change', updateSyncSelection)); updateSyncSelection();
 }
 function updateSyncSelection() { const n = $$('.sync-row-check:checked').length; $('#sync-selected-btn').disabled = !n; $('#sync-select-all').checked = n > 0 && n === $$('.sync-row-check').length; }
@@ -1435,6 +1440,128 @@ async function saveSourceAction(event) {
   } catch (e) { toast(e.message, 'error'); } finally { setBusy(button, false); }
 }
 
+
+function formatClusterUptime(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '—';
+  let value = Math.max(0, Math.floor(Number(seconds)));
+  const days = Math.floor(value / 86400); value %= 86400;
+  const hours = Math.floor(value / 3600); value %= 3600;
+  const minutes = Math.floor(value / 60);
+  return days ? `${days}д ${hours}ч` : hours ? `${hours}ч ${minutes}м` : `${minutes}м`;
+}
+
+function clusterLoadText(row) {
+  if (row.load === null || row.load === undefined) return '—';
+  if (row.load_unit === '%') return `${Number(row.load).toFixed(1)}%`;
+  if (row.load_unit === 'kbps') return `${Number(row.load).toFixed(0)} kbps`;
+  return `${Number(row.load).toFixed(0)} ${row.load_unit || ''}`.trim();
+}
+
+async function loadClusterOverview(refresh = false) {
+  try {
+    const payload = await api(`/api/cluster/overview${refresh ? '?refresh=true' : ''}`);
+    state.clusterPayload = payload;
+    renderClusterOverview();
+  } catch (error) {
+    $('#cluster-body').innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
+    $('#cluster-live-dot').classList.add('offline');
+  }
+}
+
+function renderClusterOverview() {
+  const payload = state.clusterPayload || {};
+  const summary = payload.summary || {};
+  const settings = payload.settings || {};
+  const rows = payload.nodes || [];
+  $('#cluster-online').textContent = `${summary.online || 0}/${summary.nodes || 0}`;
+  $('#cluster-clients').textContent = summary.clients || 0;
+  $('#cluster-streams').textContent = summary.streams || 0;
+  $('#cluster-output').textContent = `${Number(summary.output_bitrate_kbps || 0).toLocaleString('ru-RU', { maximumFractionDigits: 0 })} kbps`;
+  $('#cluster-average-load').textContent = summary.average_load === null || summary.average_load === undefined ? '—' : Number(summary.average_load).toFixed(1);
+  $('#cluster-mode-foot').textContent = `режим ${settings.mode || 'clients'}`;
+  $('#cluster-updated').textContent = `Обновлено ${new Date((payload.ts || Date.now()/1000) * 1000).toLocaleTimeString('ru-RU')}`;
+  $('#cluster-live-dot').classList.toggle('offline', !settings.enabled || !(summary.online || 0));
+  const balancer = payload.balancer || {};
+  $('#cluster-balancer-name').textContent = balancer.server_name ? `${settings.balancer_name || 'lb01'} · ${balancer.server_name}` : (settings.balancer_name || 'Cluster не настроен');
+  const status = $('#cluster-balancer-status');
+  status.className = `status-pill ${balancer.online ? 'alive' : settings.enabled ? 'danger' : 'waiting'}`;
+  status.textContent = balancer.online ? 'Online' : settings.enabled ? 'Offline' : 'Выключен';
+  $('#cluster-body').innerHTML = rows.map(row => `<tr>
+    <td><strong>${escapeHtml(row.host || row.server_name)}</strong><span class="cell-sub">${escapeHtml(row.server_name || '')}</span></td>
+    <td>${loadPercent(row.cpu_percent)}</td><td>${loadPercent(row.memory_percent)}</td>
+    <td>${row.clients ?? 0}</td><td>${row.streams ?? 0}</td>
+    <td>${Number(row.output_bitrate_kbps || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}</td>
+    <td><span class="status-pill ${row.online ? (row.state === 'warning' || row.state === 'critical' ? 'waiting' : 'alive') : 'danger'}">${clusterLoadText(row)}</span></td>
+    <td>${formatClusterUptime(row.uptime_seconds)}</td></tr>`).join('') || emptyRow(8);
+}
+
+function startClusterMonitor() {
+  loadClusterOverview();
+  clearInterval(state.clusterTimer);
+  state.clusterTimer = setInterval(() => { if (state.currentView === 'cluster') loadClusterOverview(false); }, 5000);
+}
+
+function stopClusterMonitor() {
+  clearInterval(state.clusterTimer); state.clusterTimer = null;
+}
+
+async function openClusterSettings() {
+  try {
+    const data = await api('/api/cluster/settings');
+    state.clusterSettings = data.settings || {};
+    const settings = state.clusterSettings;
+    $('#cluster-enabled').checked = settings.enabled !== false;
+    $('#cluster-balancer-id').value = settings.balancer_name || 'lb01';
+    $('#cluster-mode').value = settings.mode || 'clients';
+    $('#cluster-key').value = '';
+    $('#cluster-key-help').textContent = settings.has_cluster_key ? 'Ключ уже сохранён. Оставьте пустым, чтобы не менять.' : 'Укажите общий cluster_key.';
+    $('#cluster-balancer-server').innerHTML = '<option value="">Не выбран</option>' + state.servers.map(server => `<option value="${escapeHtml(server.id)}">${escapeHtml(server.name)}</option>`).join('');
+    $('#cluster-balancer-server').value = settings.balancer_server_id || '';
+    const peers = new Map((settings.peers || []).map(peer => [peer.server_id, peer]));
+    $('#cluster-peer-list').innerHTML = state.servers.filter(server => server.enabled).map(server => {
+      const peer = peers.get(server.id);
+      let host = peer?.host || '';
+      if (!host) { try { host = new URL(server.url).hostname; } catch (_) { host = server.name; } }
+      return `<div class="cluster-peer-row" data-server-id="${escapeHtml(server.id)}"><label><input class="cluster-peer-check" type="checkbox" ${peer ? 'checked' : ''}> <strong>${escapeHtml(server.name)}</strong></label><input class="cluster-peer-host" value="${escapeHtml(host)}" placeholder="cdn-1.example.com"><input class="cluster-peer-limit" value="${escapeHtml(peer?.max_bitrate || '')}" placeholder="max 40M"></div>`;
+    }).join('') || '<p class="muted">Нет включённых серверов.</p>';
+    $('#cluster-dialog').showModal();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function saveClusterSettings(event) {
+  event.preventDefault();
+  const button = $('#cluster-submit');
+  const peers = $$('.cluster-peer-row').filter(row => $('.cluster-peer-check', row).checked).map(row => ({
+    server_id: row.dataset.serverId,
+    host: $('.cluster-peer-host', row).value.trim(),
+    max_bitrate: $('.cluster-peer-limit', row).value.trim() || null,
+  }));
+  if ($('#cluster-enabled').checked && !peers.length) return toast('Выберите хотя бы один peer', 'error');
+  const payload = {
+    enabled: $('#cluster-enabled').checked,
+    balancer_server_id: $('#cluster-balancer-server').value || null,
+    balancer_name: $('#cluster-balancer-id').value.trim() || 'lb01',
+    mode: $('#cluster-mode').value,
+    cluster_key: $('#cluster-key').value.trim() || null,
+    peers,
+  };
+  setBusy(button, true);
+  try {
+    await api('/api/cluster/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#cluster-dialog').close(); toast('Настройки Cluster сохранены'); await loadClusterOverview(true);
+  } catch (error) { toast(error.message, 'error', 6500); } finally { setBusy(button, false); }
+}
+
+async function toggleClusterConfig() {
+  const preview = $('#cluster-config-preview');
+  if (!preview.classList.contains('hidden')) { preview.classList.add('hidden'); $('#cluster-config-btn').textContent = 'Показать конфиг'; return; }
+  try {
+    const data = await api('/api/cluster/config');
+    preview.textContent = data.config || '';
+    preview.classList.remove('hidden'); $('#cluster-config-btn').textContent = 'Скрыть конфиг';
+  } catch (error) { toast(error.message, 'error'); }
+}
+
 async function loadBackups(){try{const d=await api('/api/backups?limit=500');state.backupItems=d.items||[];renderBackups();}catch(e){toast(e.message,'error');}}
 function renderBackups(){const q=($('#backups-filter').value||'').toLowerCase();const items=state.backupItems.filter(x=>!q||[x.stream_name,x.server_name,x.action].join(' ').toLowerCase().includes(q));$('#backups-count').textContent=items.length;$('#backups-body').innerHTML=items.map(x=>`<tr><td>${formatDate(x.ts)}</td><td><strong>${escapeHtml(x.stream_name)}</strong></td><td>${escapeHtml(x.server_name)}</td><td>${escapeHtml(x.action)}</td><td class="mono">${escapeHtml(x.config_hash||'—')}</td><td><button class="btn ghost small restore-backup" data-id="${x.id}">Откатить</button></td></tr>`).join('')||emptyRow(6);$$('.restore-backup').forEach(b=>b.addEventListener('click',()=>restoreBackup(b.dataset.id)));}
 async function restoreBackup(id){const item=state.backupItems.find(x=>String(x.id)===String(id));if(!confirm(`Восстановить ${item?.stream_name||'поток'} из версии #${id}? Текущая конфигурация тоже будет сохранена.`))return;try{await api(`/api/backups/${id}/restore`,{method:'POST'});toast('Конфигурация восстановлена');await Promise.all([loadBackups(),loadStreams(),loadAudit()]);}catch(e){toast(e.message,'error');}}
@@ -1463,10 +1590,11 @@ $('#login-form').addEventListener('submit', async event => {
   } catch (error) { $('#login-error').textContent = error.message; }
 });
 
-$('#logout-btn').addEventListener('click', async () => { try { await api('/api/auth/logout', { method: 'POST' }); } finally { stopMonitor(); stopLoadMonitor(); showLogin(); } });
+$('#logout-btn').addEventListener('click', async () => { try { await api('/api/auth/logout', { method: 'POST' }); } finally { stopMonitor(); stopLoadMonitor(); stopClusterMonitor(); showLogin(); } });
 $('#refresh-btn').addEventListener('click', async () => {
   if (state.currentView === 'monitor') await loadMonitorSnapshot(true);
   else if (state.currentView === 'load') await loadLoadSnapshot(true);
+  else if (state.currentView === 'cluster') await loadClusterOverview(true);
   else if (state.currentView === 'sync') await loadSyncOverview();
   else if (state.currentView === 'sources') await loadSourceChecks();
   else if (state.currentView === 'backups') await loadBackups();
@@ -1503,6 +1631,7 @@ $$('.nav-item').forEach(item => item.addEventListener('click', () => switchView(
 $$('.modal-close').forEach(button => button.addEventListener('click', () => { const dialog=button.closest('dialog'); if(dialog.id==='preview-dialog') $('#preview-frame').src='about:blank'; dialog.close(); }));
 $('#select-all-streams').addEventListener('change', e => { filteredStreams().forEach(x => e.target.checked ? state.selectedStreams.add(x.name) : state.selectedStreams.delete(x.name)); renderStreams(); updateBulkState(); });
 $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEventListener('submit', saveBulk); $('#bulk-operation').addEventListener('change', updateBulkValueField);
+$('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);
 $('#sync-refresh-btn').addEventListener('click', loadSyncOverview); $('#sync-filter').addEventListener('input', renderSyncOverview); $('#sync-status-filter').addEventListener('change', renderSyncOverview); $('#sync-selected-btn').addEventListener('click', syncSelected); $('#sync-select-all').addEventListener('change',e=>{$$('.sync-row-check').forEach(c=>c.checked=e.target.checked);updateSyncSelection();});
 $('#sources-run-btn').addEventListener('click', runSourceChecks); $('#sources-filter').addEventListener('input', renderSourceChecks); $('#sources-status-filter').addEventListener('change', renderSourceChecks); $('#source-action-form').addEventListener('submit', saveSourceAction); $('#source-action-type').addEventListener('change', updateSourceActionFields);
 $('#backups-refresh-btn').addEventListener('click', loadBackups); $('#backups-filter').addEventListener('input', renderBackups);

@@ -53,7 +53,7 @@ class FlussonicClient:
             "timeout": timeout,
             "follow_redirects": True,
             "limits": limits,
-            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.7"},
+            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.8"},
         }
         self._clients = {
             True: httpx.AsyncClient(verify=True, **common),
@@ -312,15 +312,62 @@ class FlussonicClient:
         encoded_name = quote(name, safe="/")
         return await self._request(server, "DELETE", f"/streamer/api/v3/streams/{encoded_name}")
 
-    @staticmethod
-    def config_hash(config: dict[str, Any]) -> str:
-        clean = {
-            key: value
-            for key, value in config.items()
-            if key not in {"stats", "cluster_key", "named_by"}
+    @classmethod
+    def canonical_config(cls, config: dict[str, Any] | None) -> dict[str, Any]:
+        """Normalize old/new Flussonic representations for meaningful comparison.
+
+        Position and runtime/service fields are intentionally ignored: they do not
+        change stream playback and frequently differ after imports or reordering.
+        """
+        if not isinstance(config, dict):
+            return {}
+        ignored = {
+            "stats", "cluster_key", "named_by", "position", "runtime",
+            "last_error", "source_error", "effective", "config_on_disk",
         }
-        encoded = json.dumps(clean, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+
+        def clean(value: Any, key: str = "") -> Any:
+            if isinstance(value, dict):
+                result = {}
+                for child_key, child_value in value.items():
+                    if child_key in ignored:
+                        continue
+                    normalized = clean(child_value, child_key)
+                    if normalized not in (None, "", [], {}):
+                        result[child_key] = normalized
+                return result
+            if isinstance(value, list):
+                result = [clean(item, key) for item in value]
+                return [item for item in result if item not in (None, "", [], {})]
+            if key == "on_play" and isinstance(value, str):
+                return {"url": value}
+            return value
+
+        normalized = clean(dict(config))
+        on_play = normalized.get("on_play")
+        if isinstance(on_play, str):
+            normalized["on_play"] = {"url": on_play}
+        inputs = normalized.get("inputs")
+        if isinstance(inputs, list):
+            fixed = []
+            for item in inputs:
+                if isinstance(item, str):
+                    fixed.append({"url": item})
+                elif isinstance(item, dict):
+                    fixed.append(item)
+            normalized["inputs"] = fixed
+        return normalized
+
+    @classmethod
+    def config_hash(cls, config: dict[str, Any] | None) -> str:
+        encoded = json.dumps(cls.canonical_config(config), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()[:12]
+
+    @classmethod
+    def config_diff(cls, base: dict[str, Any] | None, other: dict[str, Any] | None) -> list[str]:
+        left, right = cls.canonical_config(base), cls.canonical_config(other)
+        keys = sorted(set(left) | set(right))
+        return [key for key in keys if left.get(key) != right.get(key)]
 
     @staticmethod
     def select_servers(

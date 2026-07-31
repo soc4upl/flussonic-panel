@@ -301,3 +301,63 @@ class NotificationSettingsUpdate(BaseModel):
 
 class NotificationTestRequest(BaseModel):
     message: str = "Тестовое уведомление Cyrius Stream Control"
+
+class ClusterPeerItem(BaseModel):
+    server_id: str = Field(min_length=1, max_length=64)
+    host: str = Field(min_length=1, max_length=255)
+    max_bitrate: str | None = Field(default=None, max_length=32)
+
+    @field_validator("host")
+    @classmethod
+    def clean_cluster_host(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(char in value for char in ("\n", "\r", "\x00", "{", "}", ";")):
+            raise ValueError("Некорректный hostname peer")
+        return value
+
+    @field_validator("max_bitrate")
+    @classmethod
+    def clean_max_bitrate(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"\d+(?:[KMG])?", value, flags=re.IGNORECASE):
+            raise ValueError("max_bitrate: число с необязательным K, M или G")
+        return value.upper()
+
+
+class ClusterSettingsUpdate(BaseModel):
+    enabled: bool = True
+    balancer_server_id: str | None = Field(default=None, max_length=64)
+    balancer_name: str = Field(default="lb01", min_length=1, max_length=64)
+    mode: str = "clients"
+    cluster_key: str | None = Field(default=None, max_length=255)
+    peers: list[ClusterPeerItem] = Field(default_factory=list, max_length=100)
+
+    @field_validator("balancer_name")
+    @classmethod
+    def clean_balancer_name(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError("Имя balancer может содержать латиницу, цифры, _, - и .")
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def clean_cluster_mode(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"clients", "bitrate", "usage", "streams"}:
+            raise ValueError("Режим должен быть clients, bitrate, usage или streams")
+        return value
+
+    @model_validator(mode="after")
+    def unique_cluster_peers(self) -> "ClusterSettingsUpdate":
+        server_ids = [item.server_id for item in self.peers]
+        hosts = [item.host.lower() for item in self.peers]
+        if len(server_ids) != len(set(server_ids)):
+            raise ValueError("Один сервер выбран в Cluster несколько раз")
+        if len(hosts) != len(set(hosts)):
+            raise ValueError("Hostname peer повторяется")
+        return self

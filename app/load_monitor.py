@@ -526,11 +526,26 @@ class ServerLoadMonitor:
                 errors.append(str(exc))
                 samples = []
 
+        stream_stats: dict[str, Any] | None = None
         if samples:
             item = self._from_metrics(server, samples, now, metrics_path or source, source=source)
+            try:
+                stream_stats = await self.client.aggregate_stream_stats(server)
+            except Exception as exc:
+                errors.append(f"Stream stats: {exc}")
         else:
-            fallback = await self.client.aggregate_stream_stats(server)
-            item = self._from_fallback(server, fallback, "; ".join(errors) or None)
+            stream_stats = await self.client.aggregate_stream_stats(server)
+            item = self._from_fallback(server, stream_stats, "; ".join(errors) or None)
+        if stream_stats is not None:
+            item.update({
+                "streams": int(stream_stats.get("streams") or 0),
+                "running_streams": int(stream_stats.get("running_streams") or 0),
+                "alive_streams": int(stream_stats.get("alive_streams") or 0),
+                "output_bandwidth_bps": float(stream_stats.get("output_bandwidth_bps") or 0),
+                "input_bandwidth_bps": float(stream_stats.get("input_bandwidth_bps") or 0),
+            })
+        if errors and not item.get("error"):
+            item["metrics_warning"] = "; ".join(errors)
         item["node_exporter_url"] = exporter_url or None
         item["latency_ms"] = round((time.monotonic() - started) * 1000)
         item["ts"] = int(now)

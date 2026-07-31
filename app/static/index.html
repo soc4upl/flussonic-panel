@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1020">
   <title>Cyrius Stream Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=57">
+  <link rel="stylesheet" href="/static/styles.css?v=58">
 </head>
 <body>
   <div id="toast-root" class="toast-root"></div>
@@ -44,6 +44,7 @@
         <button class="nav-item" data-view="servers"><span class="nav-icon">◉</span>Серверы</button>
         <button class="nav-item" data-view="monitor"><span class="nav-icon">⌁</span>Мониторинг</button>
         <button class="nav-item" data-view="load"><span class="nav-icon">◒</span>Нагрузка</button>
+        <button class="nav-item" data-view="cluster"><span class="nav-icon">⬡</span>Cluster</button>
         <button class="nav-item" data-view="sync"><span class="nav-icon">◎</span>Синхронизация</button>
         <button class="nav-item" data-view="sources"><span class="nav-icon">⚡</span>Источники</button>
         <button class="nav-item" data-view="backups"><span class="nav-icon">↶</span>Резервные копии</button>
@@ -246,6 +247,30 @@
         </section>
       </section>
 
+
+      <section id="cluster-view" class="view-section hidden">
+        <div class="section-intro cluster-intro">
+          <div><div class="live-title"><span id="cluster-live-dot" class="live-dot"></span><h2>Flussonic Cluster</h2></div><p>Состояние load balancer и peer-серверов. CPU/RAM/uptime берутся из Node Exporter, clients — из sessions API, streams и output bitrate — из Flussonic API.</p></div>
+          <div class="toolbar-right"><button id="cluster-settings-btn" class="btn ghost">⚙ Настроить</button><button id="cluster-refresh-btn" class="btn primary">↻ Обновить</button></div>
+        </div>
+        <div class="metric-grid cluster-metrics">
+          <article class="metric-card"><span class="metric-label">Узлы онлайн</span><strong id="cluster-online">—</strong><span class="metric-foot">peer-серверы</span></article>
+          <article class="metric-card"><span class="metric-label">Clients</span><strong id="cluster-clients">—</strong><span class="metric-foot">активные сессии</span></article>
+          <article class="metric-card"><span class="metric-label">Streams</span><strong id="cluster-streams">—</strong><span class="metric-foot">в конфигурации</span></article>
+          <article class="metric-card"><span class="metric-label">Output bitrate</span><strong id="cluster-output">—</strong><span class="metric-foot">суммарно</span></article>
+          <article class="metric-card"><span class="metric-label">Средняя Load</span><strong id="cluster-average-load">—</strong><span id="cluster-mode-foot" class="metric-foot">режим clients</span></article>
+        </div>
+        <section class="panel cluster-summary-panel">
+          <div class="panel-head"><div><p class="eyebrow">LOAD BALANCER</p><h3 id="cluster-balancer-name">Не настроен</h3></div><div class="toolbar-right"><span id="cluster-balancer-status" class="status-pill waiting">Не настроен</span><button id="cluster-config-btn" class="btn ghost small">Показать конфиг</button></div></div>
+          <div id="cluster-config-note" class="callout"><span>i</span><p>Панель генерирует конфигурацию для старого Flussonic. Перед ручной заменой flussonic.conf сделайте резервную копию.</p></div>
+          <pre id="cluster-config-preview" class="cluster-config-preview hidden"></pre>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><div><p class="eyebrow">CLUSTER OVERVIEW</p><h3>Состояние peer-серверов</h3></div><span id="cluster-updated" class="soft-badge">Нет данных</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Host</th><th>CPU (%)</th><th>Mem (%)</th><th>Clients</th><th>Streams</th><th>Output bitrate (kbps)</th><th>Load</th><th>Uptime</th></tr></thead><tbody id="cluster-body"></tbody></table></div>
+        </section>
+      </section>
+
       <section id="sync-view" class="view-section hidden">
         <div class="section-intro"><div><h2>Умная синхронизация</h2><p>Сравнение всех потоков с основным сервером, поиск отсутствующих и отличающихся конфигураций.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
         <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sync-filter" placeholder="Поиск потока"></label><select id="sync-status-filter" class="select"><option value="all">Все</option><option value="drift">Только различия</option><option value="missing">Отсутствующие</option></select></div><div class="toolbar-right"><button id="sync-selected-btn" class="btn primary small" disabled>Синхронизировать выбранные</button><span id="sync-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th><input id="sync-select-all" type="checkbox"></th><th>Поток</th><th>Состояние</th><th>Серверы</th></tr></thead><tbody id="sync-body"></tbody></table></div></section>
@@ -273,6 +298,22 @@
       </section>
     </main>
   </div>
+
+
+  <dialog id="cluster-dialog" class="modal wide-modal">
+    <form id="cluster-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">CLUSTER SETTINGS</p><h2>Настройка Cluster</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body form-grid">
+        <label class="switch-row full"><input id="cluster-enabled" type="checkbox" checked><span class="switch"></span><span><strong>Cluster включён</strong><small>Показывать мониторинг и генерировать balancer-конфиг</small></span></label>
+        <label class="field"><span>Сервер load balancer</span><select id="cluster-balancer-server" class="select"><option value="">Не выбран</option></select></label>
+        <label class="field"><span>Имя balancer</span><input id="cluster-balancer-id" value="lb01" placeholder="lb01"></label>
+        <label class="field"><span>Режим</span><select id="cluster-mode" class="select"><option value="clients">clients</option><option value="bitrate">bitrate</option><option value="usage">usage</option><option value="streams">streams</option></select></label>
+        <label class="field"><span>Cluster key</span><input id="cluster-key" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять"><small id="cluster-key-help">Хранится зашифрованным.</small></label>
+        <div class="field full"><div class="field-title"><span>Peer-серверы</span><small>Hostname должен совпадать с именем в peer/server.</small></div><div id="cluster-peer-list" class="cluster-peer-list"></div></div>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="cluster-submit" type="submit" class="btn primary">Сохранить Cluster</button></footer>
+    </form>
+  </dialog>
 
   <dialog id="server-dialog" class="modal">
     <form id="server-form" method="dialog" class="modal-card">
@@ -362,6 +403,6 @@
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=57" defer></script>
+  <script src="/static/app.js?v=58" defer></script>
 </body>
 </html>
