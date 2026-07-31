@@ -30,6 +30,10 @@ const state = {
   clusterPayload: null,
   clusterSettings: null,
   clusterTimer: null,
+  placementEnabled: false,
+  placementItems: [],
+  placementSelected: new Set(),
+  placementServerCounts: [],
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -148,6 +152,24 @@ function renderTargets(container, checkedIds = null) {
     </label>`).join('') || '<span class="muted">Нет включённых серверов</span>';
 }
 
+function streamPlacement(stream) {
+  return stream?.placement || { enabled: state.placementEnabled, configured_mode: 'mirror', effective_mode: 'mirror', primary_server_id: null };
+}
+
+function desiredTargetIds(stream = null) {
+  const placement = streamPlacement(stream);
+  if (state.placementEnabled && placement.configured_mode === 'assigned' && placement.primary_server_id) return [placement.primary_server_id];
+  return state.servers.filter(server => server.enabled && server.online).map(server => server.id);
+}
+
+function fillPlacementServerSelect(select, selected = '') {
+  const counts = new Map((state.placementServerCounts || []).map(item => [item.server_id, item]));
+  select.innerHTML = '<option value="">Выберите сервер</option>' + state.servers.filter(server => server.enabled).map(server => {
+    const capacity=counts.get(server.id); const suffix=capacity ? ` · ${capacity.assigned}/${capacity.capacity}` : '';
+    return `<option value="${escapeHtml(server.id)}" ${server.id === selected ? 'selected' : ''}>${escapeHtml(server.name)}${escapeHtml(suffix)}${server.online ? '' : ' · offline'}</option>`;
+  }).join('');
+}
+
 function addInputRow(container, value = '', draggable = true) {
   const row = document.createElement('div');
   row.className = 'input-row';
@@ -208,6 +230,7 @@ async function init() {
     document.title = me.title;
     showApp();
     await loadServers();
+    await loadPlacementSettings();
     await loadStreams();
   } catch (_) {
     showLogin();
@@ -293,6 +316,7 @@ async function loadStreams() {
   try {
     const data = await api(`/api/streams?server_id=${encodeURIComponent(state.selectedServerId || '')}`);
     state.streams = data.items;
+    state.placementEnabled = Boolean(data.placement_enabled);
     renderStreams();
     $('#metric-total').textContent = data.stats.total;
     $('#metric-alive').textContent = data.stats.alive;
@@ -329,7 +353,7 @@ function renderStreams() {
     return `<tr draggable="true" data-name="${escapeHtml(stream.name)}">
       <td><input class="stream-select" type="checkbox" ${state.selectedStreams.has(stream.name) ? 'checked' : ''}></td>
       <td><span class="drag-handle" title="Изменить порядок">⋮⋮</span></td>
-      <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')}</span></div></div></td>
+      <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')} · ${streamPlacement(stream).configured_mode === 'assigned' ? escapeHtml(streamPlacement(stream).primary_server_name || 'CDN не выбран') : 'зеркало'}</span></div></div></td>
       <td><div class="input-stack">${inputIcons}<span class="input-count">${stream.inputs.length} input</span></div></td>
       <td><span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span></td>
       <td><span class="mono">${stream.position}</span></td>
@@ -390,7 +414,7 @@ async function saveStreamOrder() {
   if (visibleNames.length !== state.streams.length) return toast('Для изменения порядка сбросьте поиск и фильтры', 'error');
   const payload = {
     streams: visibleNames.map((name, index) => ({ name, position: index + 1 })),
-    target_ids: state.servers.filter(server => server.enabled).map(server => server.id),
+    target_ids: [state.selectedServerId],
   };
   try {
     const result = await api('/api/streams/reorder/batch', { method: 'PUT', body: JSON.stringify(payload) });
@@ -423,7 +447,11 @@ function openStreamModal(name = null) {
   const list = $('#create-input-list');
   list.innerHTML = '';
   (state.currentStream?.inputs?.length ? state.currentStream.inputs : [{ url: '' }]).forEach(item => addInputRow(list, item.url, true));
-  renderTargets($('#create-targets'));
+  const placement = streamPlacement(state.currentStream);
+  $('#stream-placement-mode').value = placement.configured_mode || 'mirror';
+  fillPlacementServerSelect($('#stream-placement-server'), placement.primary_server_id || '');
+  renderTargets($('#create-targets'), desiredTargetIds(state.currentStream));
+  updateStreamPlacementFields();
   $('#stream-dialog').showModal();
 }
 
@@ -433,7 +461,13 @@ async function saveStream(event) {
   const urls = inputValues($('#create-input-list'));
   if (!urls.length) return toast('Добавьте хотя бы один input', 'error');
   if (new Set(urls).size !== urls.length) return toast('Одинаковый input указан дважды', 'error');
-  const targetIds = checkedTargets($('#create-targets'));
+  let targetIds = checkedTargets($('#create-targets'));
+  const placementMode = $('#stream-placement-mode').value;
+  const placementServerId = $('#stream-placement-server').value;
+  if (placementMode === 'assigned') {
+    if (!placementServerId) return toast('Выберите основной CDN', 'error');
+    targetIds = [placementServerId];
+  }
   if (!targetIds.length) return toast('Выберите хотя бы один сервер', 'error');
   setBusy(button, true);
   try {
@@ -445,6 +479,8 @@ async function saveStream(event) {
       position: $('#stream-position').value ? Number($('#stream-position').value) : (state.currentStream?.position ?? null),
       inputs: urls.map(url => ({ url })),
       target_ids: targetIds,
+      placement_mode: $('#stream-placement-mode').value,
+      placement_server_id: $('#stream-placement-mode').value === 'assigned' ? $('#stream-placement-server').value : null,
     };
 
     if (state.currentStream) {
@@ -456,6 +492,9 @@ async function saveStream(event) {
         position: common.position ?? state.currentStream.position,
       };
       delete fallback.target_ids;
+      delete fallback.placement_mode;
+      delete fallback.placement_server_id;
+      fallback.placement = { enabled: state.placementEnabled, configured_mode: common.placement_mode, effective_mode: state.placementEnabled ? common.placement_mode : 'mirror', primary_server_id: common.placement_server_id, primary_server_name: state.servers.find(server => server.id === common.placement_server_id)?.name || null };
       const result = await api(`/api/streams/${encodeURIComponent(state.currentStream.name)}`, {
         method: 'PATCH',
         body: JSON.stringify(common),
@@ -478,6 +517,7 @@ async function saveStream(event) {
         running: false,
         alive: false,
         named_by: 'config',
+        placement: { enabled: state.placementEnabled, configured_mode: payload.placement_mode, effective_mode: state.placementEnabled ? payload.placement_mode : 'mirror', primary_server_id: payload.placement_server_id, primary_server_name: state.servers.find(server => server.id === payload.placement_server_id)?.name || null },
       };
       await applyMutationResult(result, payload.name, fallback);
     }
@@ -498,7 +538,7 @@ function openInputs(name) {
   const list = $('#edit-input-list');
   list.innerHTML = '';
   stream.inputs.forEach(item => addInputRow(list, item.url, true));
-  renderTargets($('#edit-targets'));
+  renderTargets($('#edit-targets'), desiredTargetIds(stream));
   $('#inputs-dialog').showModal();
 }
 
@@ -534,13 +574,14 @@ async function openCompare(name) {
   try {
     const data = await api(`/api/compare/${encodeURIComponent(name)}`);
     $('#compare-summary').className = `sync-banner ${data.in_sync ? 'ok' : 'warn'}`;
-    $('#compare-summary').textContent = data.in_sync ? 'Конфигурация одинакова на всех серверах.' : 'Обнаружены различия или недоступный сервер.';
-    $('#compare-list').innerHTML = data.items.map(item => `
+    const model=data.placement?.effective_mode === 'assigned' ? `назначенный CDN: ${data.placement.primary_server_name || 'не найден'}` : 'зеркальная модель';
+    $('#compare-summary').textContent = data.in_sync ? `Размещение соответствует модели (${model}).` : `Обнаружены отклонения (${model}).`;
+    $('#compare-list').innerHTML = data.items.map(item => { const [cls,label]=syncStateLabel(item); return `
       <div class="compare-row">
-        <div><strong>${escapeHtml(item.server_name)}</strong><span>${item.ok ? `${item.config?.inputs?.length || 0} input · позиция ${item.config?.position ?? '—'}` : escapeHtml(item.error)}</span></div>
-        <span class="status-pill ${item.ok ? 'alive' : ''}">${item.ok ? 'Доступен' : 'Ошибка'}</span>
+        <div><strong>${escapeHtml(item.server_name)}</strong><span>${item.present ? `${item.config?.inputs?.length || 0} input · ${item.expected ? 'требуется' : 'не назначен'}` : escapeHtml(item.error || (item.expected ? 'поток отсутствует' : 'не требуется'))}</span></div>
+        <span class="status-pill ${cls === 'ok' ? 'alive' : cls === 'warn' ? 'waiting' : ''}">${escapeHtml(label)}</span>
         <span class="hash">${item.hash || '—'}</span>
-      </div>`).join('');
+      </div>`; }).join('');
   } catch (error) {
     $('#compare-summary').className = 'sync-banner warn';
     $('#compare-summary').textContent = error.message;
@@ -553,7 +594,7 @@ async function syncCurrentStream() {
   setBusy(button, true, 'Синхронизация…');
   try {
     const result = await api(`/api/sync/${encodeURIComponent(state.compareStream)}`, {
-      method: 'POST', body: JSON.stringify({ source_id: state.primaryId, target_ids: state.servers.filter(s => s.enabled).map(s => s.id) }),
+      method: 'POST', body: JSON.stringify({ source_id: state.primaryId }),
     });
     reportOperation(result, 'Поток синхронизирован');
     await openCompare(state.compareStream);
@@ -1087,14 +1128,15 @@ function switchView(view) {
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
   $('#streams-view').classList.toggle('hidden', view !== 'streams');
   $('#servers-view').classList.toggle('hidden', view !== 'servers');
-  ['monitor','load','cluster','sync','sources','backups','audit','alerts'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
-  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
+  ['monitor','load','cluster','placement','sync','sources','backups','audit','alerts'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
+  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', placement: 'Размещение каналов', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
   $('#page-title').textContent = titles[view] || 'Панель';
   $('#add-stream-btn').classList.toggle('hidden', view !== 'streams');
   if (view !== 'cluster') stopClusterMonitor();
   if (view === 'monitor') startMonitor();
   if (view === 'load') startLoadMonitor();
   if (view === 'cluster') startClusterMonitor();
+  if (view === 'placement') loadPlacementOverview();
   if (view === 'sync') loadSyncOverview();
   if (view === 'sources') loadSourceChecks();
   if (view === 'backups') loadBackups();
@@ -1306,32 +1348,154 @@ async function openDiagnostics(name) {
   } catch (error) { $('#diagnostics-summary').innerHTML = `<p class="form-error">${escapeHtml(error.message)}</p>`; }
 }
 
+async function loadPlacementSettings() {
+  try {
+    const data = await api('/api/placement/settings');
+    state.placementEnabled = Boolean(data.enabled);
+    if ($('#placement-enabled')) $('#placement-enabled').checked = state.placementEnabled;
+    updatePlacementModeCopy();
+  } catch (_) {}
+}
+
+function updatePlacementModeCopy() {
+  const enabled = state.placementEnabled;
+  if ($('#placement-mode-title')) $('#placement-mode-title').textContent = enabled ? 'Гибридная' : 'Зеркальная';
+  if ($('#placement-mode-help')) $('#placement-mode-help').textContent = enabled
+    ? 'Назначенные каналы работают на одном CDN; остальные продолжают зеркалироваться.'
+    : 'Все каналы должны быть на всех включённых серверах. Сохранённые назначения временно не применяются.';
+}
+
+async function togglePlacementMode() {
+  const enabled = $('#placement-enabled').checked;
+  try {
+    await api('/api/placement/settings', { method: 'PUT', body: JSON.stringify({ enabled }) });
+    state.placementEnabled = enabled; updatePlacementModeCopy();
+    toast(enabled ? 'Гибридное размещение включено' : 'Зеркальный режим включён');
+    await Promise.all([loadPlacementOverview(), loadStreams()]);
+  } catch (error) { $('#placement-enabled').checked = state.placementEnabled; toast(error.message, 'error'); }
+}
+
+async function loadPlacementOverview() {
+  $('#placement-body').innerHTML = '<tr class="loading-row"><td colspan="6">Сканирование размещения…</td></tr>';
+  try {
+    const data = await api('/api/placement/overview');
+    state.placementEnabled = Boolean(data.enabled); state.placementItems = data.items || []; state.placementServerCounts = data.server_counts || []; state.placementSelected.clear();
+    $('#placement-enabled').checked = state.placementEnabled; updatePlacementModeCopy();
+    fillPlacementServerSelect($('#placement-server-select'));
+    $('#placement-total').textContent = data.summary?.total ?? 0;
+    $('#placement-assigned').textContent = data.summary?.assigned ?? 0;
+    $('#placement-mirror').textContent = data.summary?.mirror ?? 0;
+    $('#placement-drift').textContent = data.summary?.drift ?? 0;
+    renderPlacementOverview();
+  } catch (error) { $('#placement-body').innerHTML = `<tr><td colspan="6">${escapeHtml(error.message)}</td></tr>`; }
+}
+
+function placementActualText(item) {
+  const present = item.states.filter(state => state.present).map(state => state.server_name);
+  return present.length ? present.join(', ') : 'Нигде';
+}
+
+function renderPlacementOverview() {
+  const q = ($('#placement-filter').value || '').toLowerCase(); const filter = $('#placement-status-filter').value;
+  const items = state.placementItems.filter(item => {
+    const mode = item.placement?.configured_mode || 'mirror';
+    return (!q || item.name.toLowerCase().includes(q)) && (filter === 'all' || filter === mode || (filter === 'drift' && !item.in_sync));
+  });
+  $('#placement-count').textContent = `${items.length}`;
+  $('#placement-body').innerHTML = items.map(item => {
+    const assigned = item.placement?.configured_mode === 'assigned';
+    const inactive = assigned && !state.placementEnabled;
+    return `<tr data-name="${escapeHtml(item.name)}"><td><input class="placement-row-check" type="checkbox" ${state.placementSelected.has(item.name) ? 'checked' : ''}></td><td><strong>${escapeHtml(item.name)}</strong></td><td><span class="status-pill ${assigned ? 'waiting' : 'alive'}">${assigned ? 'Один CDN' : 'Зеркало'}</span>${inactive ? '<span class="cell-sub">назначение сохранено, но выключено</span>' : ''}</td><td>${assigned ? escapeHtml(item.placement.primary_server_name || 'сервер удалён') : 'Все включённые CDN'}</td><td class="url-cell">${escapeHtml(placementActualText(item))}</td><td><span class="status-pill ${item.in_sync ? 'alive' : 'waiting'}">${item.in_sync ? 'Готово' : 'Нужно применить'}</span></td></tr>`;
+  }).join('') || emptyRow(6);
+  $$('.placement-row-check').forEach(box => box.addEventListener('change', event => { const name=event.target.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); updatePlacementSelection(); }));
+  updatePlacementSelection();
+}
+
+function updatePlacementSelection() {
+  const count = state.placementSelected.size;
+  $('#placement-assign-btn').disabled = !count || !state.placementEnabled;
+  $('#placement-mirror-btn').disabled = !count;
+  $('#placement-apply-btn').disabled = !count;
+  const visible = $$('.placement-row-check');
+  $('#placement-select-all').checked = visible.length > 0 && visible.every(box => box.checked);
+}
+
+async function assignPlacement(mode) {
+  const names = [...state.placementSelected]; if (!names.length) return;
+  const serverId = mode === 'assigned' ? $('#placement-server-select').value : null;
+  if (mode === 'assigned' && !serverId) return toast('Выберите CDN', 'error');
+  if (mode === 'assigned') {
+    const capacity=(state.placementServerCounts || []).find(item => item.server_id === serverId);
+    if (capacity && capacity.assigned + names.length > capacity.capacity && !confirm(`${capacity.server_name}: после назначения может быть больше ${capacity.capacity} каналов. Продолжить?`)) return;
+  }
+  try {
+    await api('/api/placement/bulk/assign', { method: 'PUT', body: JSON.stringify({ names, mode, server_id: serverId }) });
+    toast(mode === 'assigned' ? `Каналы назначены на ${state.servers.find(server => server.id === serverId)?.name || serverId}` : 'Каналы возвращены в зеркало');
+    await loadPlacementOverview();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function applyPlacement() {
+  const names = [...state.placementSelected]; if (!names.length) return;
+  const removeExtras = $('#placement-remove-extras').checked;
+  const text = removeExtras ? `Применить размещение для ${names.length} каналов и удалить лишние копии? Перед удалением будут созданы резервные копии.` : `Создать и проверить назначенные копии для ${names.length} каналов? Лишние копии останутся работать.`;
+  if (!confirm(text)) return;
+  const button=$('#placement-apply-btn'); setBusy(button,true,'Применение…');
+  try {
+    const result=await api('/api/placement/apply',{method:'POST',body:JSON.stringify({names,remove_extras:removeExtras})});
+    toast(result.ok ? `Готово: ${result.success_count} операций` : `Ошибок: ${result.failure_count}`, result.ok ? 'success' : 'error', 7000);
+    await Promise.all([loadPlacementOverview(), loadSyncOverview()]);
+  } catch(error){toast(error.message,'error',7000);} finally{setBusy(button,false);}
+}
+
+function updateStreamPlacementFields() {
+  const assigned = $('#stream-placement-mode').value === 'assigned';
+  $('#stream-placement-server-field').classList.toggle('hidden', !assigned);
+  $('#stream-targets-field').classList.toggle('hidden', assigned);
+  if (assigned) {
+    const selected=$('#stream-placement-server').value;
+    renderTargets($('#create-targets'), selected ? [selected] : []);
+  } else renderTargets($('#create-targets'), state.servers.filter(server=>server.enabled&&server.online).map(server=>server.id));
+}
+
 async function loadSyncOverview() {
   $('#sync-body').innerHTML = '<tr class="loading-row"><td colspan="4">Сравнение серверов…</td></tr>';
-  try { const data = await api('/api/sync/overview'); state.syncItems = data.items || []; renderSyncOverview(); }
+  try { const data = await api('/api/sync/overview'); state.syncItems = data.items || []; state.placementEnabled = Boolean(data.placement_enabled); renderSyncOverview(); }
   catch (error) { $('#sync-body').innerHTML = `<tr><td colspan="4">${escapeHtml(error.message)}</td></tr>`; }
 }
 
+function syncStateLabel(item) {
+  if (item.state === 'ok') return ['ok', 'OK'];
+  if (item.state === 'missing') return ['bad', 'нет · нужен'];
+  if (item.state === 'different') return ['warn', `другая${(item.differences || []).length ? `: ${item.differences.join(', ')}` : ''}`];
+  if (item.state === 'extra') return ['warn', 'лишняя копия'];
+  if (item.state === 'error') return ['bad', 'ошибка'];
+  return ['', 'не требуется'];
+}
 function renderSyncOverview() {
   const q = ($('#sync-filter').value || '').toLowerCase(); const f = $('#sync-status-filter').value;
-  const items = state.syncItems.filter(x => (!q || x.name.toLowerCase().includes(q)) && (f === 'all' || (f === 'drift' && !x.in_sync) || (f === 'missing' && x.states.some(s => !s.present))));
+  const items = state.syncItems.filter(x => (!q || x.name.toLowerCase().includes(q)) && (f === 'all' || (f === 'drift' && !x.in_sync) || (f === 'missing' && x.states.some(s => s.state === 'missing'))));
   $('#sync-count').textContent = `${items.length}`;
-  $('#sync-body').innerHTML = items.map(x => `<tr data-name="${escapeHtml(x.name)}"><td><input class="sync-row-check" type="checkbox"></td><td><strong>${escapeHtml(x.name)}</strong></td><td><span class="status-pill ${x.in_sync ? 'alive' : 'waiting'}">${x.in_sync ? 'Синхронно' : 'Различия'}</span></td><td><div class="sync-server-pills">${x.states.map(s => `<span class="mini-state ${s.matches_primary ? 'ok' : s.present ? 'warn' : 'bad'}">${escapeHtml(s.server_name)} · ${s.present ? (s.matches_primary ? 'OK' : `другая${(s.differences||[]).length ? `: ${(s.differences||[]).join(', ')}` : ''}`) : 'нет'}</span>`).join('')}</div></td></tr>`).join('') || emptyRow(4);
+  $('#sync-body').innerHTML = items.map(x => `<tr data-name="${escapeHtml(x.name)}"><td><input class="sync-row-check" type="checkbox"></td><td><strong>${escapeHtml(x.name)}</strong><span class="cell-sub">${x.placement?.effective_mode === 'assigned' ? `назначен: ${escapeHtml(x.placement.primary_server_name || 'не найден')}` : 'зеркальный'}</span></td><td><span class="status-pill ${x.in_sync ? 'alive' : 'waiting'}">${x.in_sync ? 'Синхронно' : 'Различия'}</span></td><td><div class="sync-server-pills">${x.states.map(s => { const [cls,label]=syncStateLabel(s); return `<span class="mini-state ${cls}">${escapeHtml(s.server_name)} · ${escapeHtml(label)}</span>`; }).join('')}</div></td></tr>`).join('') || emptyRow(4);
   $$('.sync-row-check').forEach(c => c.addEventListener('change', updateSyncSelection)); updateSyncSelection();
 }
 function updateSyncSelection() { const n = $$('.sync-row-check:checked').length; $('#sync-selected-btn').disabled = !n; $('#sync-select-all').checked = n > 0 && n === $$('.sync-row-check').length; }
 async function syncSelected() {
   const names = $$('.sync-row-check:checked').map(c => c.closest('tr').dataset.name); if (!names.length) return;
   const button=$('#sync-selected-btn'); setBusy(button,true,'Синхронизация…');
-  try { const result=await api('/api/bulk',{method:'POST',body:JSON.stringify({names,operation:'sync',source_id:state.primaryId,target_ids:state.servers.filter(s=>s.enabled).map(s=>s.id)})}); toast(result.ok?'Синхронизация завершена':`Ошибок: ${result.failure_count}`,result.ok?'success':'error'); await loadSyncOverview(); }
-  catch(e){toast(e.message,'error');} finally{setBusy(button,false);}
+  try {
+    const result = state.placementEnabled
+      ? await api('/api/placement/apply',{method:'POST',body:JSON.stringify({names,remove_extras:false})})
+      : await api('/api/bulk',{method:'POST',body:JSON.stringify({names,operation:'sync',source_id:state.primaryId})});
+    toast(result.ok?'Синхронизация завершена':`Ошибок: ${result.failure_count}`,result.ok?'success':'error'); await loadSyncOverview();
+  } catch(e){toast(e.message,'error');} finally{setBusy(button,false);}
 }
 
 async function loadSourceChecks() {
   try {
     const data = await api('/api/source-checks');
     state.sourceItems = data.items || [];
-    $('#sources-interval').textContent = `${Math.round(data.interval / 60)} мин`;
+    $('#sources-interval').textContent = data.background ? `${Math.round(Number(data.interval || 0) / 60)} мин` : 'Ручной';
     renderSourceChecks();
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -1371,9 +1535,10 @@ function renderSourceChecks() {
       <td><span class="status-pill ${sourceStateClass(x.state)}">${escapeHtml(x.state)}</span>${x.detail ? `<span class="cell-sub ${detailClass}">${escapeHtml(x.detail)}</span>` : ''}</td>
       <td>${x.latency_ms ?? '—'} ms</td>
       <td>${formatDate(x.checked_at)}</td>
-      <td><button class="btn ${x.state === 'failed' ? 'danger' : 'ghost'} small source-action-open" data-index="${index}">Действия</button></td>
+      <td><div class="inline-actions"><button class="btn ghost small source-check-one" data-index="${index}">Проверить</button><button class="btn ${x.state === 'failed' ? 'danger' : 'ghost'} small source-action-open" data-index="${index}">Действия</button></div></td>
     </tr>`;
   }).join('') || emptyRow(6);
+  $$('.source-check-one', $('#sources-body')).forEach(button => button.addEventListener('click', () => runSourceCheckFor(items[Number(button.dataset.index)], button)));
   $$('.source-action-open', $('#sources-body')).forEach(button => button.addEventListener('click', () => openSourceAction(items[Number(button.dataset.index)])));
 }
 
@@ -1387,6 +1552,17 @@ async function runSourceChecks() {
     toast(`Проверено ${r.checked}, ошибок ${r.failed}${cleanupText}`, r.failed ? 'error' : 'success');
     await loadSourceChecks();
   } catch (e) { toast(e.message, 'error'); } finally { setBusy(b, false); }
+}
+
+async function runSourceCheckFor(item, button) {
+  if (!item) return;
+  setBusy(button, true, 'Проверка…');
+  try {
+    const query = new URLSearchParams({ stream_name: item.stream_name, server_id: item.server_id });
+    const r = await api(`/api/source-checks/run?${query.toString()}`, { method: 'POST' });
+    toast(`Поток ${item.stream_name}: проверено ${r.checked}, ошибок ${r.failed}`, r.failed ? 'error' : 'success');
+    await loadSourceChecks();
+  } catch (e) { toast(e.message, 'error'); } finally { setBusy(button, false); }
 }
 
 function openSourceAction(item) {
@@ -1595,6 +1771,7 @@ $('#refresh-btn').addEventListener('click', async () => {
   if (state.currentView === 'monitor') await loadMonitorSnapshot(true);
   else if (state.currentView === 'load') await loadLoadSnapshot(true);
   else if (state.currentView === 'cluster') await loadClusterOverview(true);
+  else if (state.currentView === 'placement') await loadPlacementOverview();
   else if (state.currentView === 'sync') await loadSyncOverview();
   else if (state.currentView === 'sources') await loadSourceChecks();
   else if (state.currentView === 'backups') await loadBackups();
@@ -1631,6 +1808,7 @@ $$('.nav-item').forEach(item => item.addEventListener('click', () => switchView(
 $$('.modal-close').forEach(button => button.addEventListener('click', () => { const dialog=button.closest('dialog'); if(dialog.id==='preview-dialog') $('#preview-frame').src='about:blank'; dialog.close(); }));
 $('#select-all-streams').addEventListener('change', e => { filteredStreams().forEach(x => e.target.checked ? state.selectedStreams.add(x.name) : state.selectedStreams.delete(x.name)); renderStreams(); updateBulkState(); });
 $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEventListener('submit', saveBulk); $('#bulk-operation').addEventListener('change', updateBulkValueField);
+$('#placement-enabled').addEventListener('change', togglePlacementMode); $('#placement-refresh-btn').addEventListener('click', loadPlacementOverview); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
 $('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);
 $('#sync-refresh-btn').addEventListener('click', loadSyncOverview); $('#sync-filter').addEventListener('input', renderSyncOverview); $('#sync-status-filter').addEventListener('change', renderSyncOverview); $('#sync-selected-btn').addEventListener('click', syncSelected); $('#sync-select-all').addEventListener('change',e=>{$$('.sync-row-check').forEach(c=>c.checked=e.target.checked);updateSyncSelection();});
 $('#sources-run-btn').addEventListener('click', runSourceChecks); $('#sources-filter').addEventListener('input', renderSourceChecks); $('#sources-status-filter').addEventListener('change', renderSourceChecks); $('#source-action-form').addEventListener('submit', saveSourceAction); $('#source-action-type').addEventListener('change', updateSourceActionFields);

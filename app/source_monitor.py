@@ -23,34 +23,23 @@ class SourceMonitor:
         self._lock = asyncio.Lock()
         self._server_state: dict[str, bool] = {}
         limits = httpx.Limits(max_connections=max(20, settings.source_check_concurrency * 2), max_keepalive_connections=20)
-        headers = {"User-Agent": "Cyrius-Source-Check/5.8"}
+        headers = {"User-Agent": "Cyrius-Source-Check/5.9.1"}
         self._http = {
             True: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=True, follow_redirects=True, limits=limits, headers=headers),
             False: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=False, follow_redirects=True, limits=limits, headers=headers),
         }
 
     async def start(self):
-        if self.settings.source_check_enabled and not self._task:
-            self._task = asyncio.create_task(self._loop(), name="source-health-monitor")
+        """Source probes are deliberately manual-only.
+
+        Kept as a lifecycle hook for compatibility, but it must never create a
+        scheduler or touch any source until an authenticated API request calls
+        :meth:`run_all`.
+        """
+        self._task = None
 
     async def stop(self):
-        if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
         await asyncio.gather(*(client.aclose() for client in self._http.values()))
-
-    async def _loop(self):
-        await asyncio.sleep(self.settings.source_check_seconds)
-        while True:
-            try:
-                await self.run_all()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
-            await asyncio.sleep(self.settings.source_check_seconds)
 
     @staticmethod
     def _probe_url(url: str) -> str | None:

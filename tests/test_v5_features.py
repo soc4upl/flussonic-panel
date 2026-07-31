@@ -76,3 +76,15 @@ def test_reconcile_full_server_removes_deleted_stream_records(tmp_path: Path):
 
     assert removed == 1
     assert [row["stream_name"] for row in store.source_checks()] == ["live_stream"]
+
+
+def test_source_monitor_start_is_manual_only(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from app.source_monitor import SourceMonitor
+
+    settings = SimpleNamespace(source_check_concurrency=1, source_check_timeout=2)
+    monitor = SourceMonitor(settings, None, None, None, None)
+    asyncio.run(monitor.start())
+    assert monitor._task is None
+    asyncio.run(monitor.stop())

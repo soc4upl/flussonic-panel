@@ -1,8 +1,17 @@
-# Cyrius Stream Control v5.8
+# Cyrius Stream Control v5.9.1
 
 Тёмная админ-панель для управления несколькими Flussonic Media Server.
 
-## Новое в v5.8
+## Новое в v5.9
+
+### Гибридное размещение
+
+- Общий переключатель между зеркальной и гибридной моделью.
+- Постепенная миграция: неназначенные каналы остаются зеркальными.
+- Массовое назначение выбранных каналов на конкретный CDN.
+- Отдельное безопасное применение назначения.
+- Удаление старых копий только по явной галочке и только после проверки целевого CDN.
+- Счётчик назначений по серверам с ориентиром 100 каналов на CDN.
 
 ### Раздел Cluster
 
@@ -37,12 +46,18 @@
 
 Для настоящих отличий рядом с сервером отображаются конкретные поля, например `inputs`, `provider` или `on_play`.
 
+## Ручная проверка источников
+
+Панель не создаёт фоновую задачу проверки input. Открытие раздела **Источники** только читает последние сохранённые результаты из базы. Сетевые запросы к HLS/HTTP/M4F выполняются исключительно после нажатия **Проверить все сейчас** или **Проверить** возле конкретного потока.
+
+Старые параметры `SOURCE_CHECK_ENABLED` и `SOURCE_CHECK_SECONDS` сохранены в `.env.example` для совместимости, но не включают планировщик.
+
 ## Возможности
 
 - управление Flussonic-серверами;
 - создание, редактирование, удаление и перестановка потоков;
 - drag-and-drop input;
-- фильтр и проверка нерабочих источников;
+- ручная проверка всех источников или отдельного потока без фонового обхода;
 - быстрые действия для input;
 - резервные копии и откат;
 - история действий;
@@ -54,26 +69,18 @@
 - CPU, RAM, диски и RX/TX через Node Exporter;
 - Cluster dashboard.
 
-## Обновление с предыдущей версии
+## Обновление с предыдущей версии без rsync
+
+Архив загрузите как `/root/flussonic-panel-v5.9.1.zip`, затем запустите поставляемый скрипт:
 
 ```bash
-cd /root
-
-cp /root/flussonic-panel/.env \
-   /root/flussonic-panel.env.backup
-
-rm -rf /root/flussonic-panel
-unzip /root/flussonic-panel-v5.8.zip -d /root
-
-cp /root/flussonic-panel.env.backup \
-   /root/flussonic-panel/.env
-
-cd /root/flussonic-panel
-chmod +x run-docker.sh
-./run-docker.sh
+rm -rf /tmp/flussonic-panel-v591-installer
+mkdir -p /tmp/flussonic-panel-v591-installer
+unzip -q -o /root/flussonic-panel-v5.9.1.zip -d /tmp/flussonic-panel-v591-installer
+bash /tmp/flussonic-panel-v591-installer/flussonic-panel/upgrade-from-zip.sh
 ```
 
-Docker volume `flussonic-panel-data` сохраняет серверы, пароли, историю, backups, метрики и Cluster settings.
+Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v591` и оставляет Docker volume `flussonic-panel-data` без изменений.
 
 Не удаляйте volume и не меняйте `PANEL_SECRET_KEY`.
 
@@ -86,13 +93,13 @@ curl -s http://127.0.0.1:8088/api/health
 Ожидается:
 
 ```json
-{"ok":true,"version":"5.8.0","cluster":true}
+{"ok":true,"version":"5.9.1","cluster":true,"placement":true}
 ```
 
 Откройте:
 
 ```text
-http://IP_ПАНЕЛИ:8088/?v=58
+http://IP_ПАНЕЛИ:8088/?v=591
 ```
 
 ## Настройка Cluster

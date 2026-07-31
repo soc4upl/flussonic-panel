@@ -345,3 +345,6 @@ tbody tr.drag-over { box-shadow: inset 0 2px var(--primary-2); }
 .live-dot.offline { background: #ef4444; box-shadow: 0 0 0 5px rgba(239,68,68,.12); }
 @media (max-width: 1100px) { .cluster-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .cluster-peer-row { grid-template-columns: 1fr; } .cluster-metrics { grid-template-columns: 1fr; } }
+
+/* v5.9 placement */
+.placement-mode-panel{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:22px;margin-bottom:18px}.placement-mode-copy h3{font-size:25px;margin:3px 0 7px}.placement-main-switch{min-width:360px;margin:0}.placement-toolbar{align-items:flex-start;gap:15px}.placement-actions{flex-wrap:wrap}.compact-check{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}.placement-warning{margin:0 18px 14px}.placement-warning p{margin:0}.placement-warning strong{color:var(--text)}@media(max-width:1000px){.placement-mode-panel{align-items:flex-start;flex-direction:column}.placement-main-switch{min-width:0;width:100%}.placement-toolbar{flex-direction:column}.placement-actions{width:100%}}

@@ -27,7 +27,8 @@ from .models import (
     InputsUpdate, LoginRequest, ReorderRequest, StreamCreate, StreamPatch, SyncRequest,
     ServerCreate, ServerUpdate, ServerTestRequest, BulkOperationRequest,
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
-    ClusterSettingsUpdate,
+    ClusterSettingsUpdate, PlacementSettingsUpdate, PlacementAssignmentUpdate,
+    PlacementBulkUpdate, PlacementApplyRequest,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -51,8 +52,40 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.8.0", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.9.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def placement_enabled() -> bool:
+    return bool(data_store.get_setting("placement_enabled", False))
+
+
+def placement_info(name: str) -> dict[str, Any]:
+    saved = data_store.placement(name) or {"stream_name": name, "mode": "mirror", "primary_server_id": None}
+    configured_mode = saved.get("mode") or "mirror"
+    effective_mode = configured_mode if placement_enabled() else "mirror"
+    return {**saved, "configured_mode": configured_mode, "effective_mode": effective_mode, "enabled": placement_enabled()}
+
+
+def placement_targets(name: str, servers: list[FlussonicServer] | None = None) -> list[FlussonicServer]:
+    enabled = list(servers or server_store.enabled())
+    info = placement_info(name)
+    if info["effective_mode"] == "assigned":
+        target = next((server for server in enabled if server.id == info.get("primary_server_id")), None)
+        return [target] if target else []
+    return enabled
+
+
+def placement_public(name: str) -> dict[str, Any]:
+    info = placement_info(name)
+    server = server_store.get(info.get("primary_server_id")) if info.get("primary_server_id") else None
+    return {
+        "enabled": info["enabled"],
+        "configured_mode": info["configured_mode"],
+        "effective_mode": info["effective_mode"],
+        "primary_server_id": info.get("primary_server_id"),
+        "primary_server_name": server.name if server else None,
+    }
 
 
 def get_server(server_id: str | None) -> FlussonicServer:
@@ -94,7 +127,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.8.0", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.1", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -339,14 +372,15 @@ async def streams(server_id: str | None = None, search: str | None = None, _: Se
     except FlussonicError as exc: raise HTTPException(502,str(exc)) from exc
     if search:
         n=search.casefold(); items=[x for x in items if n in x["name"].casefold() or n in x.get("title","").casefold() or n in x.get("provider","").casefold() or any(n in i["url"].casefold() for i in x.get("inputs",[]))]
-    return {"server":{"id":server.id,"name":server.name},"stats":{"total":len(items),"alive":sum(x["alive"] for x in items),"running":sum(x["running"] for x in items),"waiting":sum(x["status"]=="waiting" for x in items)},"items":items}
+    items=[dict(item, placement=placement_public(item["name"])) for item in items]
+    return {"server":{"id":server.id,"name":server.name},"stats":{"total":len(items),"alive":sum(x["alive"] for x in items),"running":sum(x["running"] for x in items),"waiting":sum(x["status"]=="waiting" for x in items)},"items":items,"placement_enabled":placement_enabled()}
 
 @app.get("/api/streams/{name:path}")
 async def stream_detail(name: str, server_id: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
     server=get_server(server_id)
     try: raw=await client.get_stream(server,name)
     except FlussonicError as exc: raise HTTPException(502,str(exc)) from exc
-    return {"server":{"id":server.id,"name":server.name},"stream":client.normalize_stream(raw),"config_on_disk":client.disk_config(raw)}
+    return {"server":{"id":server.id,"name":server.name},"stream":dict(client.normalize_stream(raw),placement=placement_public(name)),"config_on_disk":client.disk_config(raw),"placement":placement_public(name)}
 
 @app.get("/api/diagnostics/{name:path}")
 async def diagnostics(name: str, server_id: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
@@ -367,7 +401,11 @@ async def preview(name: str, server_id: str | None = None, _: Session = Depends(
 
 @app.post("/api/streams")
 async def create_stream(payload: StreamCreate, session: Session = Depends(require_session)) -> dict[str, Any]:
-    try: targets=client.select_servers(server_store.enabled(),payload.target_ids)
+    if payload.placement_mode is not None:
+        if payload.placement_mode == "assigned" and not server_store.get(payload.placement_server_id): raise HTTPException(400,"Назначенный сервер не найден")
+        data_store.set_placement(stream_name=payload.name, mode=payload.placement_mode, primary_server_id=payload.placement_server_id, actor=session.username)
+    desired = placement_targets(payload.name) if payload.placement_mode is not None else []
+    try: targets=desired or client.select_servers(server_store.enabled(),payload.target_ids)
     except FlussonicError as exc: raise HTTPException(400,str(exc)) from exc
     body={"name":payload.name,"title":payload.title,"provider":payload.provider,"static":payload.static,"inputs":[i.model_dump() for i in payload.inputs]}
     if payload.position is not None: body["position"]=payload.position
@@ -378,9 +416,13 @@ async def create_stream(payload: StreamCreate, session: Session = Depends(requir
 
 @app.patch("/api/streams/{name:path}")
 async def patch_stream(name: str,payload:StreamPatch,session:Session=Depends(require_session))->dict[str,Any]:
-    try: targets=client.select_servers(server_store.enabled(),payload.target_ids)
+    if payload.placement_mode is not None:
+        if payload.placement_mode == "assigned" and not server_store.get(payload.placement_server_id): raise HTTPException(400,"Назначенный сервер не найден")
+        data_store.set_placement(stream_name=name, mode=payload.placement_mode, primary_server_id=payload.placement_server_id, actor=session.username)
+    desired = placement_targets(name) if payload.placement_mode is not None else []
+    try: targets=desired or client.select_servers(server_store.enabled(),payload.target_ids)
     except FlussonicError as exc: raise HTTPException(400,str(exc)) from exc
-    body=payload.model_dump(exclude={"target_ids"},exclude_none=True)
+    body=payload.model_dump(exclude={"target_ids","placement_mode","placement_server_id"},exclude_none=True)
     if "on_play" in body: body["on_play"]={"url":body["on_play"]} if body["on_play"] else None
     if "inputs" in body: body["inputs"]=[i.model_dump() for i in payload.inputs or []]
     if not body: raise HTTPException(400,"Нет полей для изменения")
@@ -411,40 +453,194 @@ async def reorder_streams(payload:ReorderRequest,session:Session=Depends(require
 
 @app.get("/api/compare/{name:path}")
 async def compare_stream(name:str,_:Session=Depends(require_session))->dict[str,Any]:
+    servers=list(server_store.enabled()); primary=server_store.primary()
     async def fetch(server):
         try:
-            raw=await client.get_stream(server,name); config=client.disk_config(raw); return {"server_id":server.id,"server_name":server.name,"ok":True,"hash":client.config_hash(config),"config":config,"error":None}
-        except FlussonicError as exc: return {"server_id":server.id,"server_name":server.name,"ok":False,"hash":None,"config":None,"error":str(exc)}
-    items=await asyncio.gather(*(fetch(s) for s in server_store.enabled())); hashes={i["hash"] for i in items if i["ok"]}; return {"in_sync":len(hashes)<=1 and all(i["ok"] for i in items),"items":items}
+            raw=await client.get_stream(server,name); config=client.disk_config(raw)
+            return server,config,None
+        except FlussonicError as exc:
+            return server,None,str(exc)
+    loaded=await asyncio.gather(*(fetch(server) for server in servers))
+    configs={server.id:config for server,config,error in loaded if config}
+    errors={server.id:error for server,config,error in loaded if error}
+    placement=placement_public(name); expected_ids={server.id for server in placement_targets(name,servers)}
+    preferred=placement.get("primary_server_id") if placement["effective_mode"]=="assigned" else (primary.id if primary else None)
+    reference_id=preferred if configs.get(preferred) else next((server.id for server in servers if configs.get(server.id)),None)
+    reference=configs.get(reference_id); reference_hash=client.config_hash(reference) if reference else None
+    items=[]
+    for server in servers:
+        config=configs.get(server.id); present=bool(config); expected=server.id in expected_ids; matches=bool(config and reference and client.config_hash(config)==reference_hash)
+        if errors.get(server.id) and expected: state="error"
+        elif expected and not present: state="missing"
+        elif expected and matches: state="ok"
+        elif expected and present: state="different"
+        elif not expected and present: state="extra"
+        else: state="ignored"
+        items.append({"server_id":server.id,"server_name":server.name,"ok":not bool(errors.get(server.id)),"present":present,"expected":expected,"state":state,"hash":client.config_hash(config) if config else None,"config":config,"differences":client.config_diff(reference,config) if config and reference else [],"error":errors.get(server.id)})
+    return {"in_sync":bool(reference) and all(item["state"] in {"ok","ignored"} for item in items),"placement":placement,"reference_server_id":reference_id,"items":items}
 
-@app.get("/api/sync/overview")
-async def sync_overview(_:Session=Depends(require_session))->dict[str,Any]:
+@app.get("/api/placement/settings")
+async def get_placement_settings(_:Session=Depends(require_session))->dict[str,Any]:
+    return {"enabled":placement_enabled(),"mode":"hybrid" if placement_enabled() else "mirror","saved_assignments":len(data_store.placements())}
+
+@app.put("/api/placement/settings")
+async def save_placement_settings(payload:PlacementSettingsUpdate,session:Session=Depends(require_session))->dict[str,Any]:
+    data_store.set_setting("placement_enabled",payload.enabled)
+    data_store.audit(actor=session.username,action="placement_mode",entity_type="settings",entity_id="placement",server_id=None,status="success",summary="Включён гибридный режим размещения" if payload.enabled else "Включён зеркальный режим")
+    return {"ok":True,"enabled":payload.enabled,"mode":"hybrid" if payload.enabled else "mirror"}
+
+@app.get("/api/placement/overview")
+async def placement_overview(_:Session=Depends(require_session))->dict[str,Any]:
+    sync=await build_sync_overview(False)
+    assigned=sum(1 for item in sync["items"] if item["placement"]["configured_mode"]=="assigned")
+    counts={server.id:0 for server in server_store.enabled()}
+    for item in sync["items"]:
+        server_id=item["placement"].get("primary_server_id")
+        if item["placement"]["configured_mode"]=="assigned" and server_id in counts: counts[server_id]+=1
+    server_counts=[{"server_id":server.id,"server_name":server.name,"assigned":counts.get(server.id,0),"capacity":100} for server in server_store.enabled()]
+    return {"enabled":placement_enabled(),"items":sync["items"],"server_counts":server_counts,"summary":{"total":len(sync["items"]),"assigned":assigned,"mirror":len(sync["items"])-assigned,"drift":sum(1 for item in sync["items"] if not item["in_sync"])}}
+
+@app.put("/api/placement/stream/{name:path}")
+async def save_placement(name:str,payload:PlacementAssignmentUpdate,session:Session=Depends(require_session))->dict[str,Any]:
+    if payload.mode=="assigned" and not server_store.get(payload.server_id): raise HTTPException(400,"Сервер назначения не найден")
+    item=data_store.set_placement(stream_name=name,mode=payload.mode,primary_server_id=payload.server_id,actor=session.username)
+    data_store.audit(actor=session.username,action="placement_assign",entity_type="stream",entity_id=name,server_id=payload.server_id,status="success",summary=f"Размещение {name}: {payload.mode}",details=item)
+    return {"ok":True,"placement":placement_public(name)}
+
+@app.put("/api/placement/bulk/assign")
+async def save_placement_bulk(payload:PlacementBulkUpdate,session:Session=Depends(require_session))->dict[str,Any]:
+    if payload.mode=="assigned" and not server_store.get(payload.server_id): raise HTTPException(400,"Сервер назначения не найден")
+    items=data_store.set_placements(stream_names=payload.names,mode=payload.mode,primary_server_id=payload.server_id,actor=session.username)
+    data_store.audit(actor=session.username,action="placement_bulk_assign",entity_type="stream",entity_id=f"{len(payload.names)} streams",server_id=payload.server_id,status="success",summary=f"Назначено размещение для {len(payload.names)} потоков",details={"mode":payload.mode,"server_id":payload.server_id,"names":payload.names})
+    return {"ok":True,"updated":len(items)}
+
+@app.post("/api/placement/apply")
+async def apply_placement(payload:PlacementApplyRequest,session:Session=Depends(require_session))->dict[str,Any]:
+    servers=list(server_store.enabled())
+    async def load(server):
+        try:return server,await client.list_stream_configs(server),None
+        except Exception as exc:return server,{},str(exc)
+    loaded=await asyncio.gather(*(load(server) for server in servers))
+    maps={server.id:configs for server,configs,error in loaded}
+    server_errors={server.id:error for server,configs,error in loaded if error}
+    operation_sem=asyncio.Semaphore(8)
+
+    async def put_verified(server:FlussonicServer,name:str,body:dict[str,Any],expected_hash:str)->dict[str,Any]:
+        async with operation_sem:
+            if server_errors.get(server.id):
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"put","ok":False,"error":server_errors[server.id]}
+            try:
+                if maps.get(server.id,{}).get(name): await backup_stream(server,name,session.username,"placement_apply")
+                data=await client.put_stream(server,name,body)
+                check=await client.get_stream(server,name); actual=client.disk_config(check)
+                if client.config_hash(actual)!=expected_hash: raise FlussonicError("Проверка конфигурации после записи не прошла")
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"put","ok":True,"data":data}
+            except Exception as exc:
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"put","ok":False,"error":str(exc)}
+
+    async def delete_extra(server:FlussonicServer,name:str)->dict[str,Any]:
+        async with operation_sem:
+            if server_errors.get(server.id):
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"delete","ok":False,"error":server_errors[server.id]}
+            try:
+                await backup_stream(server,name,session.username,"placement_remove_extra")
+                data=await client.delete_stream(server,name)
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"delete","ok":True,"data":data}
+            except Exception as exc:
+                return {"server_id":server.id,"server_name":server.name,"stream_name":name,"action":"delete","ok":False,"error":str(exc)}
+
+    async def process_stream(name:str)->list[dict[str,Any]]:
+        expected={server.id for server in placement_targets(name,servers)}
+        placement=placement_public(name)
+        preferred=placement.get("primary_server_id") if placement["effective_mode"]=="assigned" else (server_store.primary().id if server_store.primary() else None)
+        reference=maps.get(preferred,{}).get(name) if preferred else None
+        if reference is None:
+            reference=next((maps.get(server.id,{}).get(name) for server in servers if maps.get(server.id,{}).get(name)),None)
+        if reference is None:
+            return [{"stream_name":name,"action":"source","ok":False,"error":"Конфигурация потока не найдена"}]
+        body=dict(reference); body.pop("name",None); expected_hash=client.config_hash(reference)
+        puts=[put_verified(server,name,body,expected_hash) for server in servers if server.id in expected and (not maps.get(server.id,{}).get(name) or client.config_hash(maps[server.id][name])!=expected_hash)]
+        stream_results=list(await asyncio.gather(*puts)) if puts else []
+        if any(not item["ok"] for item in stream_results):
+            stream_results.append({"stream_name":name,"action":"delete_skipped","ok":False,"error":"Лишние копии не удалены: целевой CDN не прошёл проверку"})
+            return stream_results
+        if payload.remove_extras:
+            deletes=[delete_extra(server,name) for server in servers if server.id not in expected and maps.get(server.id,{}).get(name)]
+            if deletes: stream_results.extend(await asyncio.gather(*deletes))
+        if not stream_results:
+            stream_results.append({"stream_name":name,"action":"noop","ok":True,"detail":"Размещение уже соответствует выбранной модели"})
+        return stream_results
+
+    grouped=await asyncio.gather(*(process_stream(name) for name in payload.names))
+    results=[item for group in grouped for item in group]
+    summary={"ok":all(item.get("ok") for item in results),"success_count":sum(bool(item.get("ok")) for item in results),"failure_count":sum(not bool(item.get("ok")) for item in results),"results":results,"remove_extras":payload.remove_extras}
+    data_store.audit(actor=session.username,action="placement_apply",entity_type="stream",entity_id=f"{len(payload.names)} streams",server_id=None,status="success" if summary["ok"] else "partial",summary=f"Применено размещение для {len(payload.names)} потоков",details=summary)
+    return summary
+
+async def build_sync_overview(send_notification:bool=True)->dict[str,Any]:
     servers=list(server_store.enabled()); primary=server_store.primary()
-    if not primary: return {"items":[],"primary_id":None}
+    if not primary: return {"items":[],"primary_id":None,"placement_enabled":placement_enabled()}
     async def load(server):
         try: return server, await client.list_stream_configs(server), None
         except Exception as exc: return server, {}, str(exc)
-    loaded=await asyncio.gather(*(load(s) for s in servers)); maps={s.id:m for s,m,e in loaded}; errors={s.id:e for s,m,e in loaded if e}; names=sorted(set().union(*(set(m) for m in maps.values())))
+    loaded=await asyncio.gather(*(load(s) for s in servers))
+    maps={server.id:configs for server,configs,error in loaded}
+    errors={server.id:error for server,configs,error in loaded if error}
+    assigned_names=set(data_store.placements())
+    names=sorted(set().union(assigned_names, *(set(configs) for configs in maps.values())))
     items=[]
     for name in names:
-        base=maps.get(primary.id,{}).get(name); base_hash=client.config_hash(base) if base else None; states=[]
-        for s in servers:
-            cfg=maps[s.id].get(name); h=client.config_hash(cfg) if cfg else None
-            differences=client.config_diff(base,cfg) if cfg and base else (["missing"] if base and not cfg else [])
-            states.append({"server_id":s.id,"server_name":s.name,"present":bool(cfg),"hash":h,"matches_primary":bool(cfg and base and h==base_hash),"differences":differences,"error":errors.get(s.id)})
-        items.append({"name":name,"primary_present":bool(base),"in_sync":bool(base) and all(x["matches_primary"] for x in states),"states":states})
+        placement=placement_public(name)
+        expected_ids={server.id for server in placement_targets(name,servers)}
+        preferred_id=placement.get("primary_server_id") if placement["effective_mode"]=="assigned" else primary.id
+        reference_id=preferred_id if maps.get(preferred_id,{}).get(name) else next((server.id for server in servers if maps.get(server.id,{}).get(name)), None)
+        reference=maps.get(reference_id,{}).get(name) if reference_id else None
+        reference_hash=client.config_hash(reference) if reference else None
+        states=[]
+        for server in servers:
+            cfg=maps.get(server.id,{}).get(name); present=bool(cfg); expected=server.id in expected_ids
+            current_hash=client.config_hash(cfg) if cfg else None
+            matches=bool(cfg and reference and current_hash==reference_hash)
+            differences=client.config_diff(reference,cfg) if cfg and reference else (["missing"] if expected and reference and not cfg else [])
+            if errors.get(server.id): state="error"
+            elif expected and not present: state="missing"
+            elif expected and matches: state="ok"
+            elif expected and present: state="different"
+            elif not expected and present: state="extra"
+            else: state="ignored"
+            states.append({"server_id":server.id,"server_name":server.name,"expected":expected,"present":present,"hash":current_hash,"matches_primary":matches,"matches_reference":matches,"differences":differences,"state":state,"error":errors.get(server.id)})
+        in_sync=bool(reference) and all(item["state"] in {"ok","ignored"} for item in states)
+        items.append({"name":name,"primary_present":bool(maps.get(primary.id,{}).get(name)),"reference_server_id":reference_id,"in_sync":in_sync,"placement":placement,"states":states})
     drift_count=sum(1 for item in items if not item["in_sync"])
-    if drift_count:
-        await notifications.send("sync_drift", f"⚠️ Рассинхронизация Flussonic: {drift_count} потоков отличаются от основного сервера {primary.name}")
-    return {"primary_id":primary.id,"primary_name":primary.name,"items":items,"errors":errors}
+    if drift_count and send_notification:
+        mode_text="гибридном режиме" if placement_enabled() else f"зеркальном режиме от {primary.name}"
+        await notifications.send("sync_drift", f"⚠️ Рассинхронизация Flussonic: {drift_count} потоков отличаются в {mode_text}")
+    return {"primary_id":primary.id,"primary_name":primary.name,"placement_enabled":placement_enabled(),"items":items,"errors":errors}
+
+
+@app.get("/api/sync/overview")
+async def sync_overview(_:Session=Depends(require_session))->dict[str,Any]:
+    return await build_sync_overview(True)
 
 @app.post("/api/sync/{name:path}")
 async def sync_stream(name:str,payload:SyncRequest,session:Session=Depends(require_session))->dict[str,Any]:
-    source=get_server(payload.source_id)
-    try:
-        raw=await client.get_stream(source,name); config=dict(client.disk_config(raw)); config.pop("name",None); targets=[s for s in client.select_servers(server_store.enabled(),payload.target_ids) if s.id!=source.id]
-    except FlussonicError as exc: raise HTTPException(400,str(exc)) from exc
-    results=await mutate_with_backup(targets,name,session.username,"stream_sync",lambda s:client.put_stream(s,name,config)); summary=operation_summary(results); summary["source"]={"id":source.id,"name":source.name}; return summary
+    candidates=[]
+    assigned=placement_public(name)
+    if assigned["effective_mode"]=="assigned" and assigned.get("primary_server_id"):
+        candidate=server_store.get(assigned["primary_server_id"]); candidates += [candidate] if candidate else []
+    requested=server_store.get(payload.source_id) if payload.source_id else None
+    primary=server_store.primary()
+    candidates += [item for item in (requested,primary,*server_store.enabled()) if item and item not in candidates]
+    source=None; raw=None
+    for candidate in candidates:
+        try: raw=await client.get_stream(candidate,name); source=candidate; break
+        except FlussonicError: continue
+    if not source or raw is None: raise HTTPException(400,"Поток не найден ни на одном доступном сервере")
+    config=dict(client.disk_config(raw)); config.pop("name",None)
+    targets=placement_targets(name) if placement_enabled() else client.select_servers(server_store.enabled(),payload.target_ids)
+    targets=[server for server in targets if server.id!=source.id]
+    results=await mutate_with_backup(targets,name,session.username,"stream_sync",lambda server:client.put_stream(server,name,config))
+    summary=operation_summary(results); summary["source"]={"id":source.id,"name":source.name}; summary["placement"]=assigned; return summary
 
 @app.post("/api/bulk")
 async def bulk(payload:BulkOperationRequest,session:Session=Depends(require_session))->dict[str,Any]:
@@ -470,7 +666,11 @@ async def bulk(payload:BulkOperationRequest,session:Session=Depends(require_sess
                     data=await client.put_stream(server,name,body)
                 return {"server_id":server.id,"server_name":server.name,"stream_name":name,"ok":True,"data":data}
             except Exception as exc: return {"server_id":server.id,"server_name":server.name,"stream_name":name,"ok":False,"error":str(exc)}
-    jobs=[one(s,n) for s in targets for n in payload.names if not (source and s.id==source.id)]; results=await asyncio.gather(*jobs); summary={"ok":all(r["ok"] for r in results),"success_count":sum(r["ok"] for r in results),"failure_count":sum(not r["ok"] for r in results),"results":results}
+    if payload.operation=="sync" and placement_enabled():
+        jobs=[one(server,name) for name in payload.names for server in placement_targets(name) if not (source and server.id==source.id)]
+    else:
+        jobs=[one(server,name) for server in targets for name in payload.names if not (source and server.id==source.id)]
+    results=await asyncio.gather(*jobs); summary={"ok":all(r["ok"] for r in results),"success_count":sum(r["ok"] for r in results),"failure_count":sum(not r["ok"] for r in results),"results":results}
     data_store.audit(actor=session.username,action=f"bulk_{payload.operation}",entity_type="stream",entity_id=f"{len(payload.names)} streams",server_id=None,status="success" if summary["ok"] else "partial",summary=f"Массовая операция {payload.operation}: {len(payload.names)} потоков",details=summary)
     return summary
 
@@ -491,7 +691,14 @@ async def restore_backup(backup_id:int,session:Session=Depends(require_session))
 async def audit(limit:int=Query(300,ge=1,le=2000),action:str|None=None,_:Session=Depends(require_session))->dict[str,Any]: return {"items":data_store.audit_items(limit,action)}
 
 @app.get("/api/source-checks")
-async def source_checks(stream_name:str|None=None,_:Session=Depends(require_session))->dict[str,Any]: return {"enabled":settings.source_check_enabled,"interval":settings.source_check_seconds,"items":data_store.source_checks(stream_name=stream_name)}
+async def source_checks(stream_name:str|None=None,_:Session=Depends(require_session))->dict[str,Any]:
+    return {
+        "enabled": True,
+        "mode": "manual",
+        "background": False,
+        "interval": None,
+        "items": data_store.source_checks(stream_name=stream_name),
+    }
 
 @app.post("/api/source-checks/run")
 async def run_source_checks(stream_name:str|None=Query(None),server_id:str|None=Query(None),session:Session=Depends(require_session))->dict[str,Any]:
@@ -551,8 +758,9 @@ async def source_action(payload:SourceActionRequest,session:Session=Depends(requ
     if payload.action=="disable_stream":
         data_store.mark_source_checks(server_id=server.id,stream_name=name,state="disabled",detail="Поток временно отключён через панель")
     else:
+        # Configuration actions must not trigger hidden network probes. Remove
+        # cached results so the operator can explicitly run a fresh check.
         data_store.delete_source_checks(server_id=server.id,stream_name=name)
-        check_result=await source_monitor.run_all(name,server.id)
     data_store.audit(actor=session.username,action=f"source_{payload.action}",entity_type="stream",entity_id=name,server_id=server.id,status="success",summary=summary_text,details={"input_url":payload.input_url,"new_input":payload.new_input})
     return {"ok":True,"action":payload.action,"server":{"id":server.id,"name":server.name},"stream":client.normalize_stream(result),"check":check_result}
 

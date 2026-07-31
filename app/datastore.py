@@ -100,6 +100,14 @@ class DataStore:
               delivered INTEGER NOT NULL DEFAULT 0,
               error TEXT
             );
+            CREATE TABLE IF NOT EXISTS stream_placements (
+              stream_name TEXT PRIMARY KEY,
+              mode TEXT NOT NULL CHECK(mode IN ('mirror','assigned')),
+              primary_server_id TEXT,
+              updated_at INTEGER NOT NULL,
+              updated_by TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_stream_placements_server ON stream_placements(primary_server_id);
             """)
 
     def backup(self, *, actor: str, action: str, stream_name: str, server_id: str, server_name: str, config: dict[str, Any], config_hash: str) -> int:
@@ -271,6 +279,42 @@ class DataStore:
         with self._lock, self._connect() as db:
             row = db.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return default if row is None else json.loads(row["value_json"])
+
+
+    def placement(self, stream_name: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM stream_placements WHERE stream_name=?", (stream_name,)).fetchone()
+        return dict(row) if row else None
+
+    def placements(self) -> dict[str, dict[str, Any]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM stream_placements ORDER BY stream_name").fetchall()
+        return {str(row["stream_name"]): dict(row) for row in rows}
+
+    def set_placement(self, *, stream_name: str, mode: str, primary_server_id: str | None, actor: str) -> dict[str, Any]:
+        if mode not in {"mirror", "assigned"}:
+            raise ValueError("Unsupported placement mode")
+        if mode == "assigned" and not primary_server_id:
+            raise ValueError("Assigned placement requires a server")
+        server_id = primary_server_id if mode == "assigned" else None
+        now = int(time.time())
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO stream_placements(stream_name,mode,primary_server_id,updated_at,updated_by)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(stream_name) DO UPDATE SET
+                     mode=excluded.mode, primary_server_id=excluded.primary_server_id,
+                     updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
+                (stream_name, mode, server_id, now, actor),
+            )
+        return {"stream_name": stream_name, "mode": mode, "primary_server_id": server_id, "updated_at": now, "updated_by": actor}
+
+    def set_placements(self, *, stream_names: list[str], mode: str, primary_server_id: str | None, actor: str) -> list[dict[str, Any]]:
+        return [self.set_placement(stream_name=name, mode=mode, primary_server_id=primary_server_id, actor=actor) for name in stream_names]
+
+    def delete_placement(self, stream_name: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM stream_placements WHERE stream_name=?", (stream_name,))
 
     def notification(self, level: str, event_type: str, message: str, delivered: bool, error: str | None = None) -> None:
         with self._lock, self._connect() as db:

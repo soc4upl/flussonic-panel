@@ -43,6 +43,8 @@ class InputsUpdate(TargetedRequest):
 
 
 class StreamCreate(TargetedRequest):
+    placement_mode: str | None = None
+    placement_server_id: str | None = Field(default=None, max_length=64)
     name: str = Field(min_length=1, max_length=255)
     title: str = Field(default="", max_length=500)
     provider: str = Field(default="CYRIUSTV", max_length=255)
@@ -64,10 +66,16 @@ class StreamCreate(TargetedRequest):
         urls = [item.url for item in self.inputs]
         if len(urls) != len(set(urls)):
             raise ValueError("Duplicate input URLs are not allowed")
+        if self.placement_mode not in {None, "mirror", "assigned"}:
+            raise ValueError("placement_mode must be mirror or assigned")
+        if self.placement_mode == "assigned" and not self.placement_server_id:
+            raise ValueError("placement_server_id is required for assigned mode")
         return self
 
 
 class StreamPatch(TargetedRequest):
+    placement_mode: str | None = None
+    placement_server_id: str | None = Field(default=None, max_length=64)
     title: str | None = Field(default=None, max_length=500)
     provider: str | None = Field(default=None, max_length=255)
     on_play: str | None = Field(default=None, max_length=2048)
@@ -77,11 +85,14 @@ class StreamPatch(TargetedRequest):
 
     @model_validator(mode="after")
     def unique_inputs(self) -> "StreamPatch":
-        if self.inputs is None:
-            return self
-        urls = [item.url for item in self.inputs]
-        if len(urls) != len(set(urls)):
-            raise ValueError("Duplicate input URLs are not allowed")
+        if self.inputs is not None:
+            urls = [item.url for item in self.inputs]
+            if len(urls) != len(set(urls)):
+                raise ValueError("Duplicate input URLs are not allowed")
+        if self.placement_mode not in {None, "mirror", "assigned"}:
+            raise ValueError("placement_mode must be mirror or assigned")
+        if self.placement_mode == "assigned" and not self.placement_server_id:
+            raise ValueError("placement_server_id is required for assigned mode")
         return self
 
 
@@ -301,6 +312,32 @@ class NotificationSettingsUpdate(BaseModel):
 
 class NotificationTestRequest(BaseModel):
     message: str = "Тестовое уведомление Cyrius Stream Control"
+
+class PlacementSettingsUpdate(BaseModel):
+    enabled: bool = False
+
+
+class PlacementAssignmentUpdate(BaseModel):
+    mode: str
+    server_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_assignment(self) -> "PlacementAssignmentUpdate":
+        if self.mode not in {"mirror", "assigned"}:
+            raise ValueError("mode must be mirror or assigned")
+        if self.mode == "assigned" and not self.server_id:
+            raise ValueError("server_id is required for assigned mode")
+        return self
+
+
+class PlacementBulkUpdate(PlacementAssignmentUpdate):
+    names: list[str] = Field(min_length=1, max_length=2000)
+
+
+class PlacementApplyRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=2000)
+    remove_extras: bool = False
+
 
 class ClusterPeerItem(BaseModel):
     server_id: str = Field(min_length=1, max_length=64)

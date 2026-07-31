@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1020">
   <title>Cyrius Stream Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=58">
+  <link rel="stylesheet" href="/static/styles.css?v=59">
 </head>
 <body>
   <div id="toast-root" class="toast-root"></div>
@@ -45,6 +45,7 @@
         <button class="nav-item" data-view="monitor"><span class="nav-icon">⌁</span>Мониторинг</button>
         <button class="nav-item" data-view="load"><span class="nav-icon">◒</span>Нагрузка</button>
         <button class="nav-item" data-view="cluster"><span class="nav-icon">⬡</span>Cluster</button>
+        <button class="nav-item" data-view="placement"><span class="nav-icon">▦</span>Размещение</button>
         <button class="nav-item" data-view="sync"><span class="nav-icon">◎</span>Синхронизация</button>
         <button class="nav-item" data-view="sources"><span class="nav-icon">⚡</span>Источники</button>
         <button class="nav-item" data-view="backups"><span class="nav-icon">↶</span>Резервные копии</button>
@@ -271,14 +272,25 @@
         </section>
       </section>
 
+
+      <section id="placement-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Размещение каналов</h2><p>Постепенный переход: неназначенные каналы остаются зеркальными, назначенные работают только на выбранном CDN.</p></div><button id="placement-refresh-btn" class="btn primary">↻ Сканировать</button></div>
+        <section class="panel placement-mode-panel">
+          <div class="placement-mode-copy"><p class="eyebrow">МОДЕЛЬ РАБОТЫ</p><h3 id="placement-mode-title">Зеркальная</h3><p id="placement-mode-help" class="muted">Все каналы должны быть на всех включённых серверах.</p></div>
+          <label class="switch-row placement-main-switch"><input id="placement-enabled" type="checkbox"><span class="switch"></span><span><strong>Гибридное распределение</strong><small>Включайте для постепенного назначения каналов по CDN</small></span></label>
+        </section>
+        <div class="metric-grid"><article class="metric-card"><span class="metric-label">Всего каналов</span><strong id="placement-total">—</strong></article><article class="metric-card"><span class="metric-label">Назначены CDN</span><strong id="placement-assigned">—</strong></article><article class="metric-card"><span class="metric-label">Остались зеркальными</span><strong id="placement-mirror">—</strong></article><article class="metric-card"><span class="metric-label">Требуют применения</span><strong id="placement-drift">—</strong></article></div>
+        <section class="panel"><div class="panel-head placement-toolbar"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="placement-filter" placeholder="Поиск канала"></label><select id="placement-status-filter" class="select"><option value="all">Все</option><option value="assigned">Назначенные</option><option value="mirror">Зеркальные</option><option value="drift">Требуют применения</option></select></div><div class="toolbar-right placement-actions"><select id="placement-server-select" class="select"><option value="">Выберите CDN</option></select><button id="placement-assign-btn" class="btn primary small" disabled>Назначить CDN</button><button id="placement-mirror-btn" class="btn ghost small" disabled>Вернуть в зеркало</button><label class="compact-check"><input id="placement-remove-extras" type="checkbox"> удалить лишние копии</label><button id="placement-apply-btn" class="btn ghost small" disabled>Применить</button><span id="placement-count" class="soft-badge">0</span></div></div><div class="placement-warning callout"><span>i</span><p><strong>Назначить CDN</strong> меняет только желаемое состояние. Кнопка <strong>Применить</strong> сначала создаёт/проверяет канал на целевом сервере. Старые копии удаляются только при отмеченной галочке.</p></div><div class="table-wrap"><table><thead><tr><th><input id="placement-select-all" type="checkbox"></th><th>Канал</th><th>Модель</th><th>Основной CDN</th><th>Фактически</th><th>Состояние</th></tr></thead><tbody id="placement-body"></tbody></table></div></section>
+      </section>
+
       <section id="sync-view" class="view-section hidden">
-        <div class="section-intro"><div><h2>Умная синхронизация</h2><p>Сравнение всех потоков с основным сервером, поиск отсутствующих и отличающихся конфигураций.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
+        <div class="section-intro"><div><h2>Умная синхронизация</h2><p>В зеркальном режиме сравнение идёт со всеми серверами; в гибридном — только с назначенным CDN, а лишние копии показываются отдельно.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
         <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sync-filter" placeholder="Поиск потока"></label><select id="sync-status-filter" class="select"><option value="all">Все</option><option value="drift">Только различия</option><option value="missing">Отсутствующие</option></select></div><div class="toolbar-right"><button id="sync-selected-btn" class="btn primary small" disabled>Синхронизировать выбранные</button><span id="sync-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th><input id="sync-select-all" type="checkbox"></th><th>Поток</th><th>Состояние</th><th>Серверы</th></tr></thead><tbody id="sync-body"></tbody></table></div></section>
       </section>
 
       <section id="sources-view" class="view-section hidden">
-        <div class="section-intro"><div><h2>Проверка источников</h2><p>Проверка HLS/HLSS, HTTP MPEG-TS (tshttp/tshttps) и доступности M4F. Для проблемного источника доступны быстрые действия с резервной копией.</p></div><button id="sources-run-btn" class="btn primary">▶ Проверить сейчас</button></div>
-        <div class="metric-grid"><article class="metric-card"><span class="metric-label">Проверено</span><strong id="sources-total">—</strong></article><article class="metric-card"><span class="metric-label">Работают</span><strong id="sources-ok">—</strong></article><article class="metric-card"><span class="metric-label">Ошибки</span><strong id="sources-failed">—</strong></article><article class="metric-card"><span class="metric-label">Интервал</span><strong id="sources-interval">—</strong></article></div>
+        <div class="section-intro"><div><h2>Проверка источников</h2><p>Только ручной режим: панель не опрашивает input в фоне. Проверка HLS/HLSS, HTTP MPEG-TS и M4F запускается кнопкой для всего списка или отдельного потока.</p></div><button id="sources-run-btn" class="btn primary">▶ Проверить все сейчас</button></div>
+        <div class="metric-grid"><article class="metric-card"><span class="metric-label">Проверено</span><strong id="sources-total">—</strong></article><article class="metric-card"><span class="metric-label">Работают</span><strong id="sources-ok">—</strong></article><article class="metric-card"><span class="metric-label">Ошибки</span><strong id="sources-failed">—</strong></article><article class="metric-card"><span class="metric-label">Режим</span><strong id="sources-interval">Ручной</strong></article></div>
         <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sources-filter" placeholder="Поток, сервер или URL"></label><select id="sources-status-filter" class="select" aria-label="Фильтр состояния источников"><option value="all">Все источники</option><option value="failed">Только нерабочие</option><option value="healthy">Только рабочие</option><option value="unsupported">Не поддерживается проверкой</option></select></div><div class="toolbar-right"><span id="sources-problem-streams" class="soft-badge">Проблемных потоков: 0</span><span id="sources-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th>Сервер / поток</th><th>Input</th><th>Состояние</th><th>Задержка</th><th>Проверено</th><th>Действия</th></tr></thead><tbody id="sources-body"></tbody></table></div></section>
       </section>
 
@@ -345,7 +357,9 @@
         <label class="field"><span>Позиция</span><input id="stream-position" type="number" min="0" placeholder="Автоматически"></label>
         <label class="switch-row"><input id="stream-static" type="checkbox"><span class="switch"></span><span><strong>Постоянный поток</strong><small>Выключено = ondemand</small></span></label>
         <div class="field full"><div class="field-title"><span>Источники input</span><button id="create-add-input" class="text-btn" type="button">＋ Добавить</button></div><div id="create-input-list" class="input-list"></div></div>
-        <div class="field full"><span>Сохранить на серверах</span><div id="create-targets" class="target-list"></div></div>
+        <label class="field"><span>Модель размещения</span><select id="stream-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
+        <label id="stream-placement-server-field" class="field hidden"><span>Основной CDN</span><select id="stream-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
+        <div id="stream-targets-field" class="field full"><span>Сохранить на серверах</span><div id="create-targets" class="target-list"></div></div>
       </div>
       <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="stream-submit" type="submit" class="btn primary">Создать поток</button></footer>
     </form>
@@ -403,6 +417,6 @@
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=58" defer></script>
+  <script src="/static/app.js?v=59" defer></script>
 </body>
 </html>
