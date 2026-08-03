@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1020">
   <title>Cyrius Stream Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=59">
+  <link rel="stylesheet" href="/static/styles.css?v=592">
 </head>
 <body>
   <div id="toast-root" class="toast-root"></div>
@@ -71,6 +71,7 @@
         <div class="top-actions">
           <div id="last-refresh" class="last-refresh">Ещё не обновлялось</div>
           <button id="refresh-btn" class="btn ghost">↻ Обновить</button>
+          <button id="import-m3u-btn" class="btn ghost">⇪ Импорт M3U</button>
           <button id="add-stream-btn" class="btn primary">＋ Добавить поток</button>
         </div>
       </header>
@@ -95,12 +96,12 @@
                 <option value="offline">Неактивные</option>
               </select>
             </div>
-            <div class="toolbar-right"><button id="bulk-open-btn" class="btn ghost small" disabled>Массовые операции</button><span id="stream-count" class="soft-badge">0 потоков</span></div>
+            <div class="toolbar-right"><button id="bulk-ondemand-btn" class="btn ghost small" disabled>On demand</button><button id="bulk-static-btn" class="btn ghost small" disabled>Static</button><button id="bulk-open-btn" class="btn ghost small" disabled>Массовые операции</button><span id="stream-count" class="soft-badge">0 потоков</span></div>
           </div>
 
           <div class="table-wrap">
             <table>
-              <thead><tr><th class="check-col"><input id="select-all-streams" type="checkbox"></th><th class="drag-col"></th><th>Поток</th><th>Источники</th><th>Статус</th><th>Позиция</th><th class="actions-col"></th></tr></thead>
+              <thead><tr><th class="check-col"><input id="select-all-streams" type="checkbox"></th><th class="drag-col"></th><th>Поток</th><th>Источники</th><th>Статус</th><th>Режим</th><th>Позиция</th><th class="actions-col"></th></tr></thead>
               <tbody id="streams-body"></tbody>
             </table>
             <div id="empty-state" class="empty-state hidden">
@@ -346,6 +347,29 @@
     </form>
   </dialog>
 
+  <dialog id="m3u-import-dialog" class="modal wide-modal">
+    <form id="m3u-import-form" method="dialog" class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">МАССОВОЕ ДОБАВЛЕНИЕ</p><h2>Импорт каналов из M3U</h2><p class="muted">Используются только название после #EXTINF и следующая за ним ссылка.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body form-grid">
+        <label class="field full"><span>M3U список</span><textarea id="m3u-import-text" class="m3u-textarea" rows="12" placeholder="#EXTM3U
+#EXTINF:-1 ...,TVP 1 HD
+http://example/1502
+#EXTINF:-1 ...,TVP 2 HD
+http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и остальные атрибуты игнорируются.</small></label>
+        <label class="field"><span>Модель размещения</span><select id="m3u-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
+        <label id="m3u-placement-server-field" class="field hidden"><span>Основной CDN</span><select id="m3u-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
+        <label class="field"><span>Режим после импорта</span><select id="m3u-stream-mode" class="select"><option value="ondemand">On demand</option><option value="static">Static · постоянно</option></select><small>После импорта режим можно менять отдельно для любого канала.</small></label>
+        <label class="switch-row full"><input id="m3u-overwrite-existing" type="checkbox"><span class="switch"></span><span><strong>Обновлять уже существующие потоки</strong><small>По умолчанию совпавшие системные имена безопасно пропускаются.</small></span></label>
+        <div class="field full">
+          <div class="field-title"><span>Предпросмотр</span><span id="m3u-preview-summary" class="soft-badge">Ещё не проверено</span></div>
+          <div class="m3u-preview-wrap"><table class="m3u-preview-table"><thead><tr><th>Название</th><th>Системное имя</th><th>Input URL</th><th>Статус</th></tr></thead><tbody id="m3u-preview-body"><tr><td colspan="4" class="muted">Нажмите «Предпросмотр»</td></tr></tbody></table></div>
+          <div id="m3u-preview-warnings" class="m3u-warnings"></div>
+        </div>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><span class="modal-spacer"></span><button id="m3u-preview-btn" type="button" class="btn ghost">Предпросмотр</button><button id="m3u-import-submit" type="submit" class="btn primary">Импортировать</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="stream-dialog" class="modal">
     <form id="stream-form" method="dialog" class="modal-card">
       <header class="modal-head"><div><p class="eyebrow">ПОТОК</p><h2 id="stream-modal-title">Новый поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header>
@@ -417,6 +441,6 @@
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=59" defer></script>
+  <script src="/static/app.js?v=592" defer></script>
 </body>
 </html>

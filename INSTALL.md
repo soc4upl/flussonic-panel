@@ -1,4 +1,4 @@
-# Установка Cyrius Stream Control v5.9.1
+# Установка Cyrius Stream Control v5.9.3
 
 ## Новый сервер
 
@@ -23,7 +23,7 @@ curl -s http://127.0.0.1:8088/api/health
 docker logs --tail=100 flussonic-panel
 ```
 
-Ожидаемая версия: `5.9.1`. Панель: `http://IP_СЕРВЕРА:8088/?v=591`.
+Ожидаемая версия: `5.9.3`. Панель: `http://IP_СЕРВЕРА:8088/?v=592`.
 
 ## Обновление из GitHub
 
@@ -35,19 +35,19 @@ git pull --ff-only
 
 ## Обновление из ZIP без rsync
 
-Архив должен находиться в `/root/flussonic-panel-v5.9.1.zip`.
+Архив должен находиться в `/root/flussonic-panel-v5.9.3.zip`.
 
 ```bash
-rm -rf /tmp/flussonic-panel-v591
-mkdir -p /tmp/flussonic-panel-v591
-unzip -q -o /root/flussonic-panel-v5.9.1.zip -d /tmp/flussonic-panel-v591
+rm -rf /tmp/flussonic-panel-v593
+mkdir -p /tmp/flussonic-panel-v593
+unzip -q -o /root/flussonic-panel-v5.9.3.zip -d /tmp/flussonic-panel-v593
 
 cp /root/flussonic-panel/.env /root/flussonic-panel.env.backup
 docker rm -f flussonic-panel 2>/dev/null || true
 
 cd /root/flussonic-panel
 find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.env' -exec rm -rf -- {} +
-cp -a /tmp/flussonic-panel-v591/flussonic-panel/. /root/flussonic-panel/
+cp -a /tmp/flussonic-panel-v593/flussonic-panel/. /root/flussonic-panel/
 cp /root/flussonic-panel.env.backup /root/flussonic-panel/.env
 chmod 600 /root/flussonic-panel/.env
 chmod +x /root/flussonic-panel/run-docker.sh
@@ -64,7 +64,7 @@ curl -s http://127.0.0.1:8088/api/health
 echo
 ```
 
-Образ должен быть `flussonic-panel:v591`.
+Образ должен быть `flussonic-panel:v593`.
 
 ## Первое включение распределения
 

@@ -348,3 +348,23 @@ tbody tr.drag-over { box-shadow: inset 0 2px var(--primary-2); }
 
 /* v5.9 placement */
 .placement-mode-panel{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:22px;margin-bottom:18px}.placement-mode-copy h3{font-size:25px;margin:3px 0 7px}.placement-main-switch{min-width:360px;margin:0}.placement-toolbar{align-items:flex-start;gap:15px}.placement-actions{flex-wrap:wrap}.compact-check{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}.placement-warning{margin:0 18px 14px}.placement-warning p{margin:0}.placement-warning strong{color:var(--text)}@media(max-width:1000px){.placement-mode-panel{align-items:flex-start;flex-direction:column}.placement-main-switch{min-width:0;width:100%}.placement-toolbar{flex-direction:column}.placement-actions{width:100%}}
+
+/* v5.9.2 M3U bulk import */
+.field textarea.m3u-textarea {
+  width: 100%; min-height: 220px; resize: vertical; border: 1px solid var(--border); border-radius: 11px;
+  padding: 12px 13px; background: rgba(6,10,20,.6); color: var(--text); outline: 0;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.field textarea.m3u-textarea:focus { border-color: rgba(124,92,255,.7); box-shadow: 0 0 0 3px rgba(124,92,255,.1); }
+.m3u-preview-wrap { margin-top: 8px; max-height: 300px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: rgba(6,10,20,.28); }
+.m3u-preview-table { min-width: 720px; }
+.m3u-preview-table th, .m3u-preview-table td { padding: 10px 12px; }
+.m3u-preview-table td:nth-child(3) { max-width: 330px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.m3u-warnings { margin-top: 9px; color: #f7cb7a; font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
+
+/* v5.9.3 quick ondemand/static controls */
+.stream-mode-switch{display:inline-flex;gap:3px;padding:3px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02);white-space:nowrap}
+.mode-btn{border:0;border-radius:7px;padding:5px 8px;background:transparent;color:var(--muted);font-size:10px;font-weight:750;cursor:pointer}
+.mode-btn:hover{color:var(--text);background:rgba(255,255,255,.045)}
+.mode-btn.active{color:#fff;background:rgba(124,92,255,.3);box-shadow:inset 0 0 0 1px rgba(158,140,255,.24)}
+.mode-btn.static-mode.active{color:#83e8cd;background:rgba(45,212,167,.13);box-shadow:inset 0 0 0 1px rgba(45,212,167,.24)}

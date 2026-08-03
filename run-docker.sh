@@ -8,11 +8,11 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-IMAGE="flussonic-panel:v591"
+IMAGE="flussonic-panel:v593"
 CONTAINER="flussonic-panel"
 VOLUME="flussonic-panel-data"
 
-echo "Сборка Cyrius Stream Control v5.9.1 без Docker-кэша..."
+echo "Сборка Cyrius Stream Control v5.9.3 без Docker-кэша..."
 docker build --no-cache -t "$IMAGE" .
 docker volume create "$VOLUME" >/dev/null
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true

@@ -1,6 +1,27 @@
-# Cyrius Stream Control v5.9.1
+# Cyrius Stream Control v5.9.3
 
 Тёмная админ-панель для управления несколькими Flussonic Media Server.
+
+## Новое в v5.9.3
+
+- быстрый переключатель `On demand / Static` для каждого потока;
+- массовые кнопки `On demand` и `Static` для отмеченных потоков;
+- выбор режима по умолчанию прямо в M3U-импорте;
+- переключение учитывает гибридное размещение: зеркало меняется на всех CDN, назначенный поток — только на своём CDN;
+- перед сменой режима сохраняется backup, отсутствующие потоки не создаются автоматически.
+
+
+### Массовый импорт M3U
+
+- Вставка обычного M3U/M3U8 текста прямо в панели.
+- Используются только отображаемое название канала из `#EXTINF` и следующая строка URL.
+- `tvg-id`, `tvg-logo`, `group-title`, `tvg-chno` и другие атрибуты игнорируются.
+- Автоматически генерируется безопасное системное имя Flussonic, включая транслитерацию кириллицы.
+- Предпросмотр перед записью: название, системное имя, URL и отметка уже существующих потоков.
+- Повторы внутри одного M3U пропускаются.
+- Уже существующие потоки по умолчанию не перезаписываются; обновление включается отдельной галочкой.
+- При импорте можно выбрать зеркальную модель или назначить все импортируемые каналы на один CDN.
+- Импорт выполняется только по запросу пользователя и ограничивает параллелизм, чтобы не создавать всплеск запросов к старым Flussonic.
 
 ## Новое в v5.9
 
@@ -71,16 +92,16 @@
 
 ## Обновление с предыдущей версии без rsync
 
-Архив загрузите как `/root/flussonic-panel-v5.9.1.zip`, затем запустите поставляемый скрипт:
+Архив загрузите как `/root/flussonic-panel-v5.9.3.zip`, затем запустите поставляемый скрипт:
 
 ```bash
-rm -rf /tmp/flussonic-panel-v591-installer
-mkdir -p /tmp/flussonic-panel-v591-installer
-unzip -q -o /root/flussonic-panel-v5.9.1.zip -d /tmp/flussonic-panel-v591-installer
-bash /tmp/flussonic-panel-v591-installer/flussonic-panel/upgrade-from-zip.sh
+rm -rf /tmp/flussonic-panel-v593-installer
+mkdir -p /tmp/flussonic-panel-v593-installer
+unzip -q -o /root/flussonic-panel-v5.9.3.zip -d /tmp/flussonic-panel-v593-installer
+bash /tmp/flussonic-panel-v593-installer/flussonic-panel/upgrade-from-zip.sh
 ```
 
-Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v591` и оставляет Docker volume `flussonic-panel-data` без изменений.
+Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v593` и оставляет Docker volume `flussonic-panel-data` без изменений.
 
 Не удаляйте volume и не меняйте `PANEL_SECRET_KEY`.
 
@@ -93,13 +114,13 @@ curl -s http://127.0.0.1:8088/api/health
 Ожидается:
 
 ```json
-{"ok":true,"version":"5.9.1","cluster":true,"placement":true}
+{"ok":true,"version":"5.9.3","cluster":true,"placement":true}
 ```
 
 Откройте:
 
 ```text
-http://IP_ПАНЕЛИ:8088/?v=591
+http://IP_ПАНЕЛИ:8088/?v=592
 ```
 
 ## Настройка Cluster

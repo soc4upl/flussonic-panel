@@ -266,6 +266,29 @@ class BulkOperationRequest(TargetedRequest):
         return value
 
 
+class StreamModeBulkRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=500)
+    static: bool
+
+
+class M3UImportRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2_000_000)
+    placement_mode: str = "mirror"
+    placement_server_id: str | None = Field(default=None, max_length=64)
+    provider: str = Field(default="CYRIUSTV", max_length=255)
+    on_play: str | None = Field(default="auth://NewAuthBackend1", max_length=2048)
+    static: bool = False
+    overwrite_existing: bool = False
+
+    @model_validator(mode="after")
+    def validate_import(self) -> "M3UImportRequest":
+        if self.placement_mode not in {"mirror", "assigned"}:
+            raise ValueError("placement_mode must be mirror or assigned")
+        if self.placement_mode == "assigned" and not self.placement_server_id:
+            raise ValueError("placement_server_id is required for assigned mode")
+        return self
+
+
 class SourceActionRequest(BaseModel):
     server_id: str = Field(min_length=1, max_length=64)
     stream_name: str = Field(min_length=1, max_length=255)

@@ -34,6 +34,7 @@ const state = {
   placementItems: [],
   placementSelected: new Set(),
   placementServerCounts: [],
+  m3uPreview: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -356,6 +357,10 @@ function renderStreams() {
       <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')} · ${streamPlacement(stream).configured_mode === 'assigned' ? escapeHtml(streamPlacement(stream).primary_server_name || 'CDN не выбран') : 'зеркало'}</span></div></div></td>
       <td><div class="input-stack">${inputIcons}<span class="input-count">${stream.inputs.length} input</span></div></td>
       <td><span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span></td>
+      <td><div class="stream-mode-switch" aria-label="Режим потока">
+        <button class="mode-btn ondemand-mode ${stream.static ? '' : 'active'}" title="Запускать по запросу">On demand</button>
+        <button class="mode-btn static-mode ${stream.static ? 'active' : ''}" title="Держать поток постоянно включённым">Static</button>
+      </div></td>
       <td><span class="mono">${stream.position}</span></td>
       <td><div class="row-actions">
         <button class="row-action inputs-action" title="Редактировать input">⇄</button>
@@ -379,6 +384,8 @@ function wireStreamRows() {
     $('.compare-action', row)?.addEventListener('click', () => openCompare(name));
     $('.preview-action', row)?.addEventListener('click', () => openPreview(name));
     $('.diagnostics-action', row)?.addEventListener('click', () => openDiagnostics(name));
+    $('.ondemand-mode', row)?.addEventListener('click', event => setStreamsMode([name], false, event.currentTarget));
+    $('.static-mode', row)?.addEventListener('click', event => setStreamsMode([name], true, event.currentTarget));
     $('.edit-action', row)?.addEventListener('click', () => openStreamModal(name));
     $('.delete-action', row)?.addEventListener('click', () => openDelete(name));
     row.addEventListener('dragstart', event => {
@@ -430,6 +437,90 @@ async function saveStreamOrder() {
     toast(`Не удалось изменить порядок: ${error.message}`, 'error');
     await loadStreams();
   }
+}
+
+function updateM3UPlacementFields() {
+  const assigned = $('#m3u-placement-mode').value === 'assigned';
+  $('#m3u-placement-server-field').classList.toggle('hidden', !assigned);
+}
+
+function openM3UImport() {
+  state.m3uPreview = null;
+  $('#m3u-import-text').value = '';
+  $('#m3u-placement-mode').value = 'mirror';
+  $('#m3u-overwrite-existing').checked = false;
+  $('#m3u-stream-mode').value = 'ondemand';
+  fillPlacementServerSelect($('#m3u-placement-server'));
+  $('#m3u-preview-summary').textContent = 'Ещё не проверено';
+  $('#m3u-preview-body').innerHTML = '<tr><td colspan="4" class="muted">Вставьте M3U и нажмите «Предпросмотр»</td></tr>';
+  $('#m3u-preview-warnings').textContent = '';
+  updateM3UPlacementFields();
+  $('#m3u-import-dialog').showModal();
+}
+
+function m3uImportPayload() {
+  const content = $('#m3u-import-text').value.trim();
+  const placementMode = $('#m3u-placement-mode').value;
+  const placementServerId = $('#m3u-placement-server').value;
+  if (!content) throw new Error('Вставьте M3U список');
+  if (placementMode === 'assigned' && !placementServerId) throw new Error('Выберите основной CDN');
+  return {
+    content,
+    placement_mode: placementMode,
+    placement_server_id: placementMode === 'assigned' ? placementServerId : null,
+    provider: 'CYRIUSTV',
+    on_play: 'auth://NewAuthBackend1',
+    static: $('#m3u-stream-mode').value === 'static',
+    overwrite_existing: $('#m3u-overwrite-existing').checked,
+  };
+}
+
+function renderM3UPreview(data) {
+  state.m3uPreview = data;
+  const items = data.items || [];
+  const existing = items.filter(item => item.existing).length;
+  $('#m3u-preview-summary').textContent = `${items.length} каналов${existing ? ` · ${existing} уже есть` : ''}`;
+  const visible = items.slice(0, 250);
+  $('#m3u-preview-body').innerHTML = visible.map(item => `<tr>
+    <td><strong>${escapeHtml(item.title)}</strong></td>
+    <td class="mono">${escapeHtml(item.name)}</td>
+    <td>${escapeHtml(item.url)}</td>
+    <td><span class="status-pill ${item.existing ? 'waiting' : 'alive'}">${item.existing ? 'уже существует' : 'новый'}</span></td>
+  </tr>`).join('') || '<tr><td colspan="4">Каналы не найдены</td></tr>';
+  const messages = [...(data.warnings || [])];
+  if (items.length > visible.length) messages.push(`В таблице показаны первые ${visible.length} из ${items.length} каналов.`);
+  for (const error of (data.inventory_errors || [])) messages.push(`${error.server_name}: не удалось проверить существующие потоки — ${error.error}`);
+  $('#m3u-preview-warnings').textContent = messages.join('\n');
+}
+
+async function previewM3UImport() {
+  const button = $('#m3u-preview-btn');
+  let payload;
+  try { payload = m3uImportPayload(); } catch (error) { return toast(error.message, 'error'); }
+  setBusy(button, true, 'Проверка…');
+  try {
+    const data = await api('/api/import/m3u/preview', { method: 'POST', body: JSON.stringify(payload) });
+    renderM3UPreview(data);
+  } catch (error) { toast(error.message, 'error', 6500); }
+  finally { setBusy(button, false); }
+}
+
+async function applyM3UImport(event) {
+  event.preventDefault();
+  const button = $('#m3u-import-submit');
+  let payload;
+  try { payload = m3uImportPayload(); } catch (error) { return toast(error.message, 'error'); }
+  if (payload.overwrite_existing && !window.confirm('Включено обновление существующих потоков. Продолжить массовый импорт?')) return;
+  setBusy(button, true, 'Импорт…');
+  try {
+    const result = await api('/api/import/m3u/apply', { method: 'POST', body: JSON.stringify(payload) });
+    const message = `M3U: создано ${result.created}, пропущено ${result.skipped}, ошибок ${result.failed}`;
+    toast(message, result.failed ? 'error' : 'success', 7500);
+    if (result.created || result.skipped) $('#m3u-import-dialog').close();
+    await loadStreams();
+    if (state.placementEnabled) await loadPlacementOverview();
+  } catch (error) { toast(error.message, 'error', 7000); }
+  finally { setBusy(button, false); }
 }
 
 function openStreamModal(name = null) {
@@ -1132,6 +1223,7 @@ function switchView(view) {
   const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', placement: 'Размещение каналов', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
   $('#page-title').textContent = titles[view] || 'Панель';
   $('#add-stream-btn').classList.toggle('hidden', view !== 'streams');
+  $('#import-m3u-btn').classList.toggle('hidden', view !== 'streams');
   if (view !== 'cluster') stopClusterMonitor();
   if (view === 'monitor') startMonitor();
   if (view === 'load') startLoadMonitor();
@@ -1277,9 +1369,31 @@ function emptyRow(columns) { return `<tr class="monitor-empty-row"><td colspan="
 function updateBulkState() {
   const count = state.selectedStreams.size;
   $('#bulk-open-btn').disabled = count === 0;
+  $('#bulk-ondemand-btn').disabled = count === 0;
+  $('#bulk-static-btn').disabled = count === 0;
   $('#bulk-open-btn').textContent = count ? `Массовые операции · ${count}` : 'Массовые операции';
   const all = filteredStreams();
   $('#select-all-streams').checked = all.length > 0 && all.every(item => state.selectedStreams.has(item.name));
+}
+
+async function setStreamsMode(names, makeStatic, button = null) {
+  if (!names.length) return;
+  const label = makeStatic ? 'Static' : 'On demand';
+  if (names.length > 1 && !window.confirm(`Перевести выбранные ${names.length} каналов в режим ${label}?`)) return;
+  setBusy(button, true, '…');
+  try {
+    const result = await api('/api/stream-mode', { method: 'PUT', body: JSON.stringify({ names, static: makeStatic }) });
+    const message = result.ok
+      ? `${label}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
+      : `${label}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
+    toast(message, result.ok ? 'success' : 'error', 6500);
+    await loadStreams();
+  } catch (error) {
+    toast(error.message, 'error', 7000);
+  } finally {
+    setBusy(button, false);
+    updateBulkState();
+  }
 }
 
 function openBulk() {
@@ -1781,6 +1895,10 @@ $('#refresh-btn').addEventListener('click', async () => {
   toast('Данные обновлены');
 });
 $('#add-stream-btn').addEventListener('click', () => openStreamModal());
+$('#import-m3u-btn').addEventListener('click', openM3UImport);
+$('#m3u-preview-btn').addEventListener('click', previewM3UImport);
+$('#m3u-import-form').addEventListener('submit', applyM3UImport);
+$('#m3u-placement-mode').addEventListener('change', updateM3UPlacementFields);
 $('#add-server-btn').addEventListener('click', () => openServerModal());
 $('#empty-add-server-btn').addEventListener('click', () => openServerModal());
 $('#server-select').addEventListener('change', event => { state.selectedServerId = event.target.value; loadStreams(); });
@@ -1807,6 +1925,8 @@ $('#mobile-menu').addEventListener('click', () => $('.sidebar').classList.toggle
 $$('.nav-item').forEach(item => item.addEventListener('click', () => switchView(item.dataset.view)));
 $$('.modal-close').forEach(button => button.addEventListener('click', () => { const dialog=button.closest('dialog'); if(dialog.id==='preview-dialog') $('#preview-frame').src='about:blank'; dialog.close(); }));
 $('#select-all-streams').addEventListener('change', e => { filteredStreams().forEach(x => e.target.checked ? state.selectedStreams.add(x.name) : state.selectedStreams.delete(x.name)); renderStreams(); updateBulkState(); });
+$('#bulk-ondemand-btn').addEventListener('click', event => setStreamsMode([...state.selectedStreams], false, event.currentTarget));
+$('#bulk-static-btn').addEventListener('click', event => setStreamsMode([...state.selectedStreams], true, event.currentTarget));
 $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEventListener('submit', saveBulk); $('#bulk-operation').addEventListener('change', updateBulkValueField);
 $('#placement-enabled').addEventListener('change', togglePlacementMode); $('#placement-refresh-btn').addEventListener('click', loadPlacementOverview); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
 $('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);

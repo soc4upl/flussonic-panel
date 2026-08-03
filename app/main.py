@@ -23,12 +23,13 @@ from .notifications import NotificationService
 from .source_monitor import SourceMonitor
 from .server_store import ServerStore, ServerStoreError
 from .cluster_store import ClusterStore, ClusterStoreError
+from .m3u_import import parse_m3u
 from .models import (
     InputsUpdate, LoginRequest, ReorderRequest, StreamCreate, StreamPatch, SyncRequest,
     ServerCreate, ServerUpdate, ServerTestRequest, BulkOperationRequest,
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
     ClusterSettingsUpdate, PlacementSettingsUpdate, PlacementAssignmentUpdate,
-    PlacementBulkUpdate, PlacementApplyRequest,
+    PlacementBulkUpdate, PlacementApplyRequest, M3UImportRequest, StreamModeBulkRequest,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -52,7 +53,7 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.9.1", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.9.3", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -127,7 +128,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.1", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.3", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -414,6 +415,105 @@ async def create_stream(payload: StreamCreate, session: Session = Depends(requir
     data_store.audit(actor=session.username,action="stream_create",entity_type="stream",entity_id=payload.name,server_id=None,status="success" if summary["ok"] else "partial",summary=f"Создан поток {payload.name}",details=summary)
     return summary
 
+@app.post("/api/import/m3u/preview")
+async def preview_m3u_import(payload: M3UImportRequest, _: Session = Depends(require_session)) -> dict[str, Any]:
+    parsed = parse_m3u(payload.content)
+    if not parsed["items"]:
+        raise HTTPException(400, "В M3U не найдено ни одной пары #EXTINF + URL")
+    if payload.placement_mode == "assigned":
+        target = server_store.get(payload.placement_server_id)
+        if target is None or not target.enabled:
+            raise HTTPException(400, "Назначенный сервер не найден или отключён")
+        targets = [target]
+    else:
+        targets = list(server_store.enabled())
+    if not targets:
+        raise HTTPException(409, "Нет включённых Flussonic-серверов")
+
+    existing: set[str] = set()
+    inventory_errors: list[dict[str, str]] = []
+    async def inventory(server: FlussonicServer):
+        try:
+            return server, await client.list_stream_configs(server), None
+        except Exception as exc:
+            return server, {}, str(exc)
+    inventories = await asyncio.gather(*(inventory(server) for server in targets))
+    for server, configs, error in inventories:
+        existing.update(str(name) for name in configs)
+        if error:
+            inventory_errors.append({"server_id": server.id, "server_name": server.name, "error": error})
+    return {**parsed, "items": [{**item, "existing": item["name"] in existing} for item in parsed["items"]], "existing": sum(item["name"] in existing for item in parsed["items"]), "inventory_errors": inventory_errors}
+
+
+@app.post("/api/import/m3u/apply")
+async def apply_m3u_import(payload: M3UImportRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
+    parsed = parse_m3u(payload.content)
+    items = parsed["items"]
+    if not items:
+        raise HTTPException(400, "В M3U не найдено ни одной пары #EXTINF + URL")
+    if payload.placement_mode == "assigned":
+        target = server_store.get(payload.placement_server_id)
+        if target is None or not target.enabled:
+            raise HTTPException(400, "Назначенный сервер не найден или отключён")
+        targets = [target]
+    else:
+        targets = list(server_store.enabled())
+    if not targets:
+        raise HTTPException(409, "Нет включённых Flussonic-серверов")
+
+    existing: set[str] = set()
+    inventory_errors: list[dict[str, str]] = []
+    async def inventory(server: FlussonicServer):
+        try:
+            return server, await client.list_stream_configs(server), None
+        except Exception as exc:
+            return server, {}, str(exc)
+    inventories = await asyncio.gather(*(inventory(server) for server in targets))
+    for server, configs, error in inventories:
+        existing.update(str(name) for name in configs)
+        if error:
+            inventory_errors.append({"server_id": server.id, "server_name": server.name, "error": error})
+
+    semaphore = asyncio.Semaphore(2)
+    async def create_one(item: dict[str, str]) -> dict[str, Any]:
+        name = item["name"]
+        if name in existing and not payload.overwrite_existing:
+            return {**item, "ok": True, "status": "skipped", "detail": "Поток уже существует; пропущен без изменений", "results": []}
+        body: dict[str, Any] = {
+            "name": name,
+            "title": item["title"],
+            "provider": payload.provider,
+            "static": payload.static,
+            "inputs": [{"url": item["url"]}],
+        }
+        if payload.on_play:
+            body["on_play"] = {"url": payload.on_play}
+        async with semaphore:
+            results = await client.run_many(targets, lambda server: client.put_stream(server, name, body))
+        summary = operation_summary(results)
+        if payload.placement_mode == "assigned" and summary["success_count"]:
+            data_store.set_placement(stream_name=name, mode="assigned", primary_server_id=payload.placement_server_id, actor=session.username)
+        return {**item, "ok": summary["ok"], "status": "created" if summary["ok"] else "partial" if summary["partial"] else "failed", "results": results}
+
+    results = await asyncio.gather(*(create_one(item) for item in items))
+    created = sum(item["status"] == "created" for item in results)
+    skipped = sum(item["status"] == "skipped" for item in results)
+    failed = sum(item["status"] in {"failed", "partial"} for item in results)
+    summary = {
+        "ok": failed == 0,
+        "partial": created > 0 and failed > 0,
+        "parsed": len(items),
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "warnings": parsed["warnings"],
+        "inventory_errors": inventory_errors,
+        "items": results,
+    }
+    data_store.audit(actor=session.username, action="m3u_import", entity_type="stream", entity_id=f"{len(items)} streams", server_id=payload.placement_server_id if payload.placement_mode == "assigned" else None, status="success" if summary["ok"] else "partial" if created else "failed", summary=f"M3U импорт: создано {created}, пропущено {skipped}, ошибок {failed}", details=summary)
+    return summary
+
+
 @app.patch("/api/streams/{name:path}")
 async def patch_stream(name: str,payload:StreamPatch,session:Session=Depends(require_session))->dict[str,Any]:
     if payload.placement_mode is not None:
@@ -641,6 +741,104 @@ async def sync_stream(name:str,payload:SyncRequest,session:Session=Depends(requi
     targets=[server for server in targets if server.id!=source.id]
     results=await mutate_with_backup(targets,name,session.username,"stream_sync",lambda server:client.put_stream(server,name,config))
     summary=operation_summary(results); summary["source"]={"id":source.id,"name":source.name}; summary["placement"]=assigned; return summary
+
+@app.put("/api/stream-mode")
+async def set_stream_mode(payload: StreamModeBulkRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
+    """Switch selected streams between ondemand and static on their effective placement targets.
+
+    Missing streams are never created by this operation: each target is read first,
+    backed up, and only then patched with the static flag. This is important while
+    migrating from mirrored to assigned placement.
+    """
+    semaphore = asyncio.Semaphore(8)
+
+    async def one(name: str, server: FlussonicServer) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                raw = await client.get_stream(server, name)
+                config = dict(client.disk_config(raw))
+                current_static = bool(config.get("static", raw.get("static", False)))
+                if current_static == payload.static:
+                    return {
+                        "server_id": server.id,
+                        "server_name": server.name,
+                        "stream_name": name,
+                        "ok": True,
+                        "static": payload.static,
+                        "changed": False,
+                        "detail": "Режим уже установлен",
+                    }
+                data_store.backup(
+                    actor=session.username,
+                    action="stream_mode",
+                    stream_name=name,
+                    server_id=server.id,
+                    server_name=server.name,
+                    config=config,
+                    config_hash=client.config_hash(config),
+                )
+                data = await client.put_stream(server, name, {"static": payload.static})
+                return {
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "stream_name": name,
+                    "ok": True,
+                    "static": payload.static,
+                    "changed": True,
+                    "data": data,
+                }
+            except Exception as exc:
+                return {
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "stream_name": name,
+                    "ok": False,
+                    "static": payload.static,
+                    "error": str(exc),
+                }
+
+    jobs = []
+    no_targets = []
+    for name in payload.names:
+        targets = placement_targets(name)
+        if not targets:
+            no_targets.append({
+                "stream_name": name,
+                "ok": False,
+                "static": payload.static,
+                "error": "Для потока не найден целевой CDN",
+            })
+            continue
+        jobs.extend(one(name, server) for server in targets)
+
+    results = list(await asyncio.gather(*jobs)) if jobs else []
+    results.extend(no_targets)
+    succeeded = [item for item in results if item["ok"]]
+    failed = [item for item in results if not item["ok"]]
+    summary = {
+        "ok": not failed,
+        "partial": bool(succeeded and failed),
+        "success_count": len(succeeded),
+        "failure_count": len(failed),
+        "changed_count": sum(bool(item.get("changed")) for item in succeeded),
+        "unchanged_count": sum(not bool(item.get("changed")) for item in succeeded),
+        "stream_count": len(payload.names),
+        "static": payload.static,
+        "mode": "static" if payload.static else "ondemand",
+        "results": results,
+    }
+    data_store.audit(
+        actor=session.username,
+        action="stream_mode_static" if payload.static else "stream_mode_ondemand",
+        entity_type="stream",
+        entity_id=f"{len(payload.names)} streams",
+        server_id=None,
+        status="success" if summary["ok"] else "partial" if summary["partial"] else "failed",
+        summary=f"Режим {'static' if payload.static else 'ondemand'}: {len(payload.names)} потоков",
+        details=summary,
+    )
+    return summary
+
 
 @app.post("/api/bulk")
 async def bulk(payload:BulkOperationRequest,session:Session=Depends(require_session))->dict[str,Any]:
