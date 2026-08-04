@@ -30,6 +30,7 @@ from .models import (
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
     ClusterSettingsUpdate, PlacementSettingsUpdate, PlacementAssignmentUpdate,
     PlacementBulkUpdate, PlacementApplyRequest, M3UImportRequest, StreamModeBulkRequest,
+    StreamStateBulkRequest,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -53,7 +54,7 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.9.3", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.9.4", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -128,7 +129,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.3", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.4", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -835,6 +836,116 @@ async def set_stream_mode(payload: StreamModeBulkRequest, session: Session = Dep
         server_id=None,
         status="success" if summary["ok"] else "partial" if summary["partial"] else "failed",
         summary=f"Режим {'static' if payload.static else 'ondemand'}: {len(payload.names)} потоков",
+        details=summary,
+    )
+    return summary
+
+
+@app.put("/api/stream-state")
+async def set_stream_state(payload: StreamStateBulkRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
+    """Temporarily disable or re-enable streams without changing their configuration.
+
+    The operation follows the effective placement model: mirrored streams are changed
+    on every enabled CDN, assigned streams only on their primary CDN. Existing static/
+    ondemand mode, inputs and other stream settings are preserved.
+    """
+    semaphore = asyncio.Semaphore(8)
+
+    async def one(name: str, server: FlussonicServer) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                raw = await client.get_stream(server, name)
+                config = dict(client.disk_config(raw))
+                current_disabled = bool(config.get("disabled", raw.get("disabled", False)))
+                if current_disabled == payload.disabled:
+                    return {
+                        "server_id": server.id,
+                        "server_name": server.name,
+                        "stream_name": name,
+                        "ok": True,
+                        "disabled": payload.disabled,
+                        "changed": False,
+                        "detail": "Состояние уже установлено",
+                    }
+
+                data_store.backup(
+                    actor=session.username,
+                    action="stream_disable" if payload.disabled else "stream_enable",
+                    stream_name=name,
+                    server_id=server.id,
+                    server_name=server.name,
+                    config=config,
+                    config_hash=client.config_hash(config),
+                )
+                data = await client.put_stream(server, name, {"disabled": payload.disabled})
+                if payload.disabled:
+                    data_store.mark_source_checks(
+                        server_id=server.id,
+                        stream_name=name,
+                        state="disabled",
+                        detail="Поток временно отключён через панель",
+                    )
+                else:
+                    # Enabling a stream must not start a hidden source probe. The cached
+                    # disabled result is removed; a fresh check remains manual-only.
+                    data_store.delete_source_checks(server_id=server.id, stream_name=name)
+                return {
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "stream_name": name,
+                    "ok": True,
+                    "disabled": payload.disabled,
+                    "changed": True,
+                    "data": data,
+                }
+            except Exception as exc:
+                return {
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "stream_name": name,
+                    "ok": False,
+                    "disabled": payload.disabled,
+                    "error": str(exc),
+                }
+
+    jobs = []
+    no_targets = []
+    for name in payload.names:
+        targets = placement_targets(name)
+        if not targets:
+            no_targets.append({
+                "stream_name": name,
+                "ok": False,
+                "disabled": payload.disabled,
+                "error": "Для потока не найден целевой CDN",
+            })
+            continue
+        jobs.extend(one(name, server) for server in targets)
+
+    results = list(await asyncio.gather(*jobs)) if jobs else []
+    results.extend(no_targets)
+    succeeded = [item for item in results if item["ok"]]
+    failed = [item for item in results if not item["ok"]]
+    summary = {
+        "ok": not failed,
+        "partial": bool(succeeded and failed),
+        "success_count": len(succeeded),
+        "failure_count": len(failed),
+        "changed_count": sum(bool(item.get("changed")) for item in succeeded),
+        "unchanged_count": sum(not bool(item.get("changed")) for item in succeeded),
+        "stream_count": len(payload.names),
+        "disabled": payload.disabled,
+        "state": "disabled" if payload.disabled else "enabled",
+        "results": results,
+    }
+    data_store.audit(
+        actor=session.username,
+        action="stream_disable" if payload.disabled else "stream_enable",
+        entity_type="stream",
+        entity_id=f"{len(payload.names)} streams",
+        server_id=None,
+        status="success" if summary["ok"] else "partial" if summary["partial"] else "failed",
+        summary=f"{'Временно отключено' if payload.disabled else 'Включено'}: {len(payload.names)} потоков",
         details=summary,
     )
     return summary

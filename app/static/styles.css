@@ -368,3 +368,11 @@ tbody tr.drag-over { box-shadow: inset 0 2px var(--primary-2); }
 .mode-btn:hover{color:var(--text);background:rgba(255,255,255,.045)}
 .mode-btn.active{color:#fff;background:rgba(124,92,255,.3);box-shadow:inset 0 0 0 1px rgba(158,140,255,.24)}
 .mode-btn.static-mode.active{color:#83e8cd;background:rgba(45,212,167,.13);box-shadow:inset 0 0 0 1px rgba(45,212,167,.24)}
+
+
+/* v5.9.4 temporary stream disable/enable controls */
+.stream-disabled-row{opacity:.72}
+.stream-disabled-row .stream-logo{filter:grayscale(1)}
+.row-action.disable-stream-action{color:#f6bd68}
+.row-action.enable-stream-action{color:#68e0b8;box-shadow:inset 0 0 0 1px rgba(45,212,167,.2)}
+.btn.danger-soft{color:#ff9aa5;border-color:rgba(255,101,119,.25)}

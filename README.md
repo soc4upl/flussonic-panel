@@ -1,6 +1,17 @@
-# Cyrius Stream Control v5.9.3
+# Cyrius Stream Control v5.9.4
 
 Тёмная админ-панель для управления несколькими Flussonic Media Server.
+
+## Новое в v5.9.4
+
+- Временное отключение потока без удаления конфигурации (`disabled=true`).
+- Быстрая кнопка питания в каждой строке потока: отключить / включить.
+- Массовые кнопки **Отключить** и **Включить** для отмеченных каналов.
+- Операция следует модели размещения: зеркало — все CDN, назначенный канал — только основной CDN.
+- `Static/On demand`, inputs, provider, auth и placement при отключении не меняются.
+- При включении фоновые source-check не запускаются; свежая проверка остаётся ручной.
+- Новый фильтр **Временно отключённые**.
+
 
 ## Новое в v5.9.3
 
@@ -92,16 +103,16 @@
 
 ## Обновление с предыдущей версии без rsync
 
-Архив загрузите как `/root/flussonic-panel-v5.9.3.zip`, затем запустите поставляемый скрипт:
+Архив загрузите как `/root/flussonic-panel-v5.9.4.zip`, затем запустите поставляемый скрипт:
 
 ```bash
-rm -rf /tmp/flussonic-panel-v593-installer
-mkdir -p /tmp/flussonic-panel-v593-installer
-unzip -q -o /root/flussonic-panel-v5.9.3.zip -d /tmp/flussonic-panel-v593-installer
-bash /tmp/flussonic-panel-v593-installer/flussonic-panel/upgrade-from-zip.sh
+rm -rf /tmp/flussonic-panel-v594-installer
+mkdir -p /tmp/flussonic-panel-v594-installer
+unzip -q -o /root/flussonic-panel-v5.9.4.zip -d /tmp/flussonic-panel-v594-installer
+bash /tmp/flussonic-panel-v594-installer/flussonic-panel/upgrade-from-zip.sh
 ```
 
-Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v593` и оставляет Docker volume `flussonic-panel-data` без изменений.
+Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v594` и оставляет Docker volume `flussonic-panel-data` без изменений.
 
 Не удаляйте volume и не меняйте `PANEL_SECRET_KEY`.
 
@@ -114,13 +125,13 @@ curl -s http://127.0.0.1:8088/api/health
 Ожидается:
 
 ```json
-{"ok":true,"version":"5.9.3","cluster":true,"placement":true}
+{"ok":true,"version":"5.9.4","cluster":true,"placement":true}
 ```
 
 Откройте:
 
 ```text
-http://IP_ПАНЕЛИ:8088/?v=592
+http://IP_ПАНЕЛИ:8088/?v=594
 ```
 
 ## Настройка Cluster

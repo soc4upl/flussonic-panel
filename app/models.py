@@ -271,6 +271,11 @@ class StreamModeBulkRequest(BaseModel):
     static: bool
 
 
+class StreamStateBulkRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=500)
+    disabled: bool
+
+
 class M3UImportRequest(BaseModel):
     content: str = Field(min_length=1, max_length=2_000_000)
     placement_mode: str = "mirror"

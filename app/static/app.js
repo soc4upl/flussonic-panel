@@ -336,9 +336,10 @@ function filteredStreams() {
     const haystack = [stream.name, stream.title, stream.provider, ...(stream.inputs || []).map(item => item.url)].join(' ').toLowerCase();
     const searchMatch = !query || haystack.includes(query);
     const statusMatch = filter === 'all'
-      || (filter === 'alive' && stream.alive)
-      || (filter === 'waiting' && stream.status === 'waiting')
-      || (filter === 'offline' && !stream.alive && stream.status !== 'waiting');
+      || (filter === 'disabled' && stream.disabled)
+      || (filter === 'alive' && !stream.disabled && stream.alive)
+      || (filter === 'waiting' && !stream.disabled && stream.status === 'waiting')
+      || (filter === 'offline' && !stream.disabled && !stream.alive && stream.status !== 'waiting');
     return searchMatch && statusMatch;
   });
 }
@@ -351,7 +352,7 @@ function renderStreams() {
     const [statusClass, statusLabel] = formatStatus(stream);
     const initial = (stream.title || stream.name || '?').trim().charAt(0).toUpperCase();
     const inputIcons = (stream.inputs || []).slice(0, 3).map((_, i) => `<span class="input-dot">${i + 1}</span>`).join('');
-    return `<tr draggable="true" data-name="${escapeHtml(stream.name)}">
+    return `<tr draggable="true" data-name="${escapeHtml(stream.name)}" class="${stream.disabled ? 'stream-disabled-row' : ''}">
       <td><input class="stream-select" type="checkbox" ${state.selectedStreams.has(stream.name) ? 'checked' : ''}></td>
       <td><span class="drag-handle" title="Изменить порядок">⋮⋮</span></td>
       <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')} · ${streamPlacement(stream).configured_mode === 'assigned' ? escapeHtml(streamPlacement(stream).primary_server_name || 'CDN не выбран') : 'зеркало'}</span></div></div></td>
@@ -367,6 +368,7 @@ function renderStreams() {
         <button class="row-action compare-action" title="Сравнить серверы">◎</button>
         <button class="row-action preview-action" title="Просмотр">▶</button>
         <button class="row-action diagnostics-action" title="Диагностика">⚙</button>
+        <button class="row-action state-action ${stream.disabled ? 'enable-stream-action' : 'disable-stream-action'}" title="${stream.disabled ? 'Включить поток' : 'Временно отключить поток'}">⏻</button>
         <button class="row-action edit-action" title="Редактировать поток">✎</button>
         <button class="row-action delete delete-action" title="Удалить">⌫</button>
       </div></td>
@@ -386,6 +388,10 @@ function wireStreamRows() {
     $('.diagnostics-action', row)?.addEventListener('click', () => openDiagnostics(name));
     $('.ondemand-mode', row)?.addEventListener('click', event => setStreamsMode([name], false, event.currentTarget));
     $('.static-mode', row)?.addEventListener('click', event => setStreamsMode([name], true, event.currentTarget));
+    $('.state-action', row)?.addEventListener('click', event => {
+      const stream = state.streams.find(item => item.name === name);
+      setStreamsDisabled([name], !Boolean(stream?.disabled), event.currentTarget);
+    });
     $('.edit-action', row)?.addEventListener('click', () => openStreamModal(name));
     $('.delete-action', row)?.addEventListener('click', () => openDelete(name));
     row.addEventListener('dragstart', event => {
@@ -1371,6 +1377,8 @@ function updateBulkState() {
   $('#bulk-open-btn').disabled = count === 0;
   $('#bulk-ondemand-btn').disabled = count === 0;
   $('#bulk-static-btn').disabled = count === 0;
+  $('#bulk-disable-btn').disabled = count === 0;
+  $('#bulk-enable-btn').disabled = count === 0;
   $('#bulk-open-btn').textContent = count ? `Массовые операции · ${count}` : 'Массовые операции';
   const all = filteredStreams();
   $('#select-all-streams').checked = all.length > 0 && all.every(item => state.selectedStreams.has(item.name));
@@ -1390,6 +1398,30 @@ async function setStreamsMode(names, makeStatic, button = null) {
     await loadStreams();
   } catch (error) {
     toast(error.message, 'error', 7000);
+  } finally {
+    setBusy(button, false);
+    updateBulkState();
+  }
+}
+
+async function setStreamsDisabled(names, disabled, button = null) {
+  if (!names.length) return;
+  const action = disabled ? 'временно отключить' : 'включить';
+  const actionLabel = disabled ? 'Отключено' : 'Включено';
+  const question = names.length > 1
+    ? `${disabled ? 'Временно отключить' : 'Включить'} выбранные ${names.length} каналов?`
+    : `${disabled ? 'Временно отключить' : 'Включить'} поток «${names[0]}»?`;
+  if (!window.confirm(question)) return;
+  setBusy(button, true, '…');
+  try {
+    const result = await api('/api/stream-state', { method: 'PUT', body: JSON.stringify({ names, disabled }) });
+    const message = result.ok
+      ? `${actionLabel}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
+      : `${actionLabel}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
+    toast(message, result.ok ? 'success' : 'error', 6500);
+    await loadStreams();
+  } catch (error) {
+    toast(`Не удалось ${action} поток: ${error.message}`, 'error', 7000);
   } finally {
     setBusy(button, false);
     updateBulkState();
@@ -1927,6 +1959,8 @@ $$('.modal-close').forEach(button => button.addEventListener('click', () => { co
 $('#select-all-streams').addEventListener('change', e => { filteredStreams().forEach(x => e.target.checked ? state.selectedStreams.add(x.name) : state.selectedStreams.delete(x.name)); renderStreams(); updateBulkState(); });
 $('#bulk-ondemand-btn').addEventListener('click', event => setStreamsMode([...state.selectedStreams], false, event.currentTarget));
 $('#bulk-static-btn').addEventListener('click', event => setStreamsMode([...state.selectedStreams], true, event.currentTarget));
+$('#bulk-disable-btn').addEventListener('click', event => setStreamsDisabled([...state.selectedStreams], true, event.currentTarget));
+$('#bulk-enable-btn').addEventListener('click', event => setStreamsDisabled([...state.selectedStreams], false, event.currentTarget));
 $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEventListener('submit', saveBulk); $('#bulk-operation').addEventListener('change', updateBulkValueField);
 $('#placement-enabled').addEventListener('change', togglePlacementMode); $('#placement-refresh-btn').addEventListener('click', loadPlacementOverview); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
 $('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);

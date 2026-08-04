@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1020">
   <title>Cyrius Stream Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=592">
+  <link rel="stylesheet" href="/static/styles.css?v=594">
 </head>
 <body>
   <div id="toast-root" class="toast-root"></div>
@@ -94,9 +94,10 @@
                 <option value="alive">Только активные</option>
                 <option value="waiting">Ожидающие</option>
                 <option value="offline">Неактивные</option>
+                <option value="disabled">Временно отключённые</option>
               </select>
             </div>
-            <div class="toolbar-right"><button id="bulk-ondemand-btn" class="btn ghost small" disabled>On demand</button><button id="bulk-static-btn" class="btn ghost small" disabled>Static</button><button id="bulk-open-btn" class="btn ghost small" disabled>Массовые операции</button><span id="stream-count" class="soft-badge">0 потоков</span></div>
+            <div class="toolbar-right"><button id="bulk-ondemand-btn" class="btn ghost small" disabled>On demand</button><button id="bulk-static-btn" class="btn ghost small" disabled>Static</button><button id="bulk-disable-btn" class="btn ghost small danger-soft" disabled>Отключить</button><button id="bulk-enable-btn" class="btn ghost small" disabled>Включить</button><button id="bulk-open-btn" class="btn ghost small" disabled>Массовые операции</button><span id="stream-count" class="soft-badge">0 потоков</span></div>
           </div>
 
           <div class="table-wrap">
@@ -441,6 +442,6 @@ http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=592" defer></script>
+  <script src="/static/app.js?v=594" defer></script>
 </body>
 </html>
