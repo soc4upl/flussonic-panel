@@ -30,7 +30,7 @@ from .models import (
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
     ClusterSettingsUpdate, PlacementSettingsUpdate, PlacementAssignmentUpdate,
     PlacementBulkUpdate, PlacementApplyRequest, M3UImportRequest, StreamModeBulkRequest,
-    StreamStateBulkRequest,
+    StreamStateBulkRequest, ChangePreviewRequest,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,7 +54,7 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.9.4", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.10.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -106,6 +106,48 @@ def operation_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {"ok": not failed, "partial": bool(succeeded and failed), "success_count": len(succeeded), "failure_count": len(failed), "max_elapsed_ms": max((r.get("elapsed_ms") or 0 for r in results), default=0), "results": results}
 
 
+def _change_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"url"}:
+            return value.get("url")
+        return {k: _change_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_change_value(v) for v in value]
+    return value
+
+
+def _config_diff(current: dict[str, Any] | None, desired: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if current is None and desired is None:
+        return []
+    if desired is None:
+        return [{"field": "stream", "before": "существует", "after": "будет удалён"}]
+    if current is None:
+        return [{"field": "stream", "before": "отсутствует", "after": "будет создан"}]
+    left = client.canonical_config(current)
+    right = client.canonical_config(desired)
+    keys = sorted(set(left) | set(right))
+    changes = []
+    for key in keys:
+        before = left.get(key)
+        after = right.get(key)
+        if before != after:
+            changes.append({"field": key, "before": _change_value(before), "after": _change_value(after)})
+    return changes
+
+
+def _audit_matches_stream(item: dict[str, Any], name: str) -> bool:
+    if item.get("entity_id") == name:
+        return True
+    details = item.get("details") or {}
+    for result in details.get("results") or []:
+        if isinstance(result, dict) and result.get("stream_name") == name:
+            return True
+    for result in details.get("items") or []:
+        if isinstance(result, dict) and result.get("stream_name") == name:
+            return True
+    return False
+
+
 async def backup_stream(server: FlussonicServer, name: str, actor: str, action: str) -> int | None:
     try:
         raw = await client.get_stream(server, name)
@@ -129,7 +171,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.9.4", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.10.0", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -364,6 +406,123 @@ async def cluster_overview(refresh: bool = Query(False), _: Session = Depends(re
         },
         "summary": {"nodes": len(rows), "online": sum(bool(row["online"]) for row in rows), "clients": total_clients, "streams": total_streams, "output_bitrate_kbps": round(total_output / 1000.0, 1), "average_load": round(sum(loads) / len(loads), 1) if loads else None},
         "nodes": rows,
+    }
+
+
+
+@app.get("/api/channel-card/{name:path}")
+async def channel_card(name: str, server_id: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
+    servers = list(server_store.enabled())
+    placement = placement_public(name)
+    preferred_id = placement.get("primary_server_id") if placement.get("effective_mode") == "assigned" else (server_id or (server_store.primary().id if server_store.primary() else None))
+
+    async def inspect(server: FlussonicServer) -> dict[str, Any]:
+        try:
+            raw = await client.get_stream(server, name)
+            stream = client.normalize_stream(raw)
+            stats = raw.get("stats") if isinstance(raw.get("stats"), dict) else {}
+            return {
+                "server_id": server.id, "server_name": server.name, "online": True, "present": True,
+                "stream": stream, "config": client.disk_config(raw),
+                "clients": int(stats.get("playback_opened_sessions", stats.get("playback_total_sessions", 0)) or 0),
+                "input_bitrate": int(stats.get("inputs_bandwidth", 0) or 0),
+                "output_bitrate": int(stats.get("output_bandwidth", 0) or 0),
+                "status": stats.get("status") or stream.get("status") or "unknown",
+            }
+        except Exception as exc:
+            return {"server_id": server.id, "server_name": server.name, "online": True, "present": False, "error": str(exc), "clients": 0, "input_bitrate": 0, "output_bitrate": 0}
+
+    nodes = list(await asyncio.gather(*(inspect(server) for server in servers)))
+    reference = next((item for item in nodes if item["server_id"] == preferred_id and item.get("present")), None) or next((item for item in nodes if item.get("present")), None)
+    audit = [item for item in data_store.audit_items(500) if _audit_matches_stream(item, name)][:20]
+    backups = data_store.backups(name, 10)
+    source_checks = data_store.source_checks(stream_name=name)
+    expected_ids = {server.id for server in placement_targets(name, servers)}
+    for node in nodes:
+        node["expected"] = node["server_id"] in expected_ids
+        node["role"] = "primary" if node["server_id"] == placement.get("primary_server_id") and placement.get("effective_mode") == "assigned" else ("mirror" if node["server_id"] in expected_ids else "extra")
+    return {
+        "name": name, "placement": placement, "reference_server_id": reference.get("server_id") if reference else None,
+        "stream": reference.get("stream") if reference else None, "config": reference.get("config") if reference else None,
+        "summary": {
+            "present": sum(bool(item.get("present")) for item in nodes),
+            "expected": len(expected_ids),
+            "clients": sum(int(item.get("clients") or 0) for item in nodes),
+            "input_bitrate": sum(int(item.get("input_bitrate") or 0) for item in nodes),
+            "output_bitrate": sum(int(item.get("output_bitrate") or 0) for item in nodes),
+        },
+        "servers": nodes, "source_checks": source_checks[:20], "backups": backups, "audit": audit,
+    }
+
+
+@app.post("/api/changes/dry-run")
+async def changes_dry_run(payload: ChangePreviewRequest, _: Session = Depends(require_session)) -> dict[str, Any]:
+    enabled = list(server_store.enabled())
+    try:
+        selected_targets = client.select_servers(enabled, payload.target_ids) if payload.target_ids is not None else enabled
+    except FlussonicError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    source = get_server(payload.source_id) if payload.operation == "sync" else None
+    semaphore = asyncio.Semaphore(10)
+    source_cache: dict[str, dict[str, Any]] = {}
+
+    async def desired_for(name: str, server: FlussonicServer) -> dict[str, Any]:
+        async with semaphore:
+            try:
+                raw = await client.get_stream(server, name)
+                current = dict(client.disk_config(raw))
+                desired: dict[str, Any] | None = dict(current)
+                note = None
+                if payload.operation == "delete":
+                    desired = None
+                elif payload.operation == "add_input":
+                    inputs = list(current.get("inputs") or [])
+                    value = str(payload.value or "").strip()
+                    if value and not any(isinstance(item, dict) and item.get("url") == value for item in inputs):
+                        inputs.append({"url": value})
+                    desired["inputs"] = inputs
+                elif payload.operation == "set_provider":
+                    desired["provider"] = str(payload.value or "")
+                elif payload.operation == "set_on_play":
+                    desired["on_play"] = {"url": str(payload.value)} if payload.value else None
+                elif payload.operation == "set_static":
+                    desired["static"] = bool(payload.value)
+                elif payload.operation == "set_disabled":
+                    desired["disabled"] = bool(payload.value)
+                elif payload.operation == "sync":
+                    if source is None:
+                        raise RuntimeError("Не выбран исходный сервер")
+                    if name not in source_cache:
+                        source_raw = await client.get_stream(source, name)
+                        source_cfg = dict(client.disk_config(source_raw)); source_cfg.pop("name", None)
+                        source_cache[name] = source_cfg
+                    desired = dict(source_cache[name])
+                    note = f"источник: {source.name}"
+                changes = _config_diff(current, desired)
+                return {
+                    "stream_name": name, "server_id": server.id, "server_name": server.name, "ok": True,
+                    "changed": bool(changes), "operation": payload.operation, "changes": changes, "note": note,
+                }
+            except Exception as exc:
+                return {"stream_name": name, "server_id": server.id, "server_name": server.name, "ok": False, "changed": False, "operation": payload.operation, "changes": [], "error": str(exc)}
+
+    jobs = []
+    for name in payload.names:
+        targets = placement_targets(name, enabled) if payload.target_ids is None and payload.operation in {"set_static", "set_disabled"} else selected_targets
+        if payload.operation == "sync" and placement_enabled():
+            targets = placement_targets(name, enabled)
+        for server in targets:
+            if source and server.id == source.id:
+                continue
+            jobs.append(desired_for(name, server))
+    items = list(await asyncio.gather(*jobs)) if jobs else []
+    changed = [item for item in items if item.get("ok") and item.get("changed")]
+    unchanged = [item for item in items if item.get("ok") and not item.get("changed")]
+    failed = [item for item in items if not item.get("ok")]
+    return {
+        "ok": not failed, "operation": payload.operation, "stream_count": len(payload.names),
+        "target_count": len(items), "change_count": len(changed), "unchanged_count": len(unchanged), "failure_count": len(failed),
+        "items": items,
     }
 
 

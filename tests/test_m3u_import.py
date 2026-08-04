@@ -4,11 +4,11 @@ from app.models import M3UImportRequest
 
 SAMPLE = '''#EXTM3U
 #EXTINF:-1 tvg-id="1502" tvg-name="TVP 1 HD" group-title="Национальные" tvg-logo="https://example/1502.png" tvg-chno="1",TVP 1 HD
-http://cdn-6.cyriustv.ru:8011/sweet.php/1502?key=a1
+http://media.example.invalid/live/1502
 #EXTINF:-1 tvg-id="1503" tvg-name="TVP 2 HD" group-title="Национальные",TVP 2 HD
-http://cdn-6.cyriustv.ru:8011/sweet.php/1503?key=a1
+http://media.example.invalid/live/1503
 #EXTINF:-1 tvg-id="3904" tvg-name="MEGA HIT HD" group-title="Фильмовые",MEGA HIT HD
-http://cdn-6.cyriustv.ru:8011/sweet.php/3904?key=a1
+http://media.example.invalid/live/3904
 '''
 
 
@@ -18,7 +18,7 @@ def test_m3u_parser_uses_only_name_and_url():
     assert result["items"][0] == {
         "name": "TVP_1_HD",
         "title": "TVP 1 HD",
-        "url": "http://cdn-6.cyriustv.ru:8011/sweet.php/1502?key=a1",
+        "url": "http://media.example.invalid/live/1502",
     }
     assert result["items"][2]["name"] == "MEGA_HIT_HD"
     assert all("logo" not in item and "tvg" not in item for item in result["items"])

@@ -266,6 +266,21 @@ class BulkOperationRequest(TargetedRequest):
         return value
 
 
+class ChangePreviewRequest(TargetedRequest):
+    names: list[str] = Field(min_length=1, max_length=500)
+    operation: str
+    value: str | bool | None = None
+    source_id: str | None = None
+
+    @field_validator("operation")
+    @classmethod
+    def valid_change_operation(cls, value: str) -> str:
+        allowed = {"add_input", "set_provider", "set_on_play", "set_static", "set_disabled", "delete", "sync"}
+        if value not in allowed:
+            raise ValueError("Unsupported change operation")
+        return value
+
+
 class StreamModeBulkRequest(BaseModel):
     names: list[str] = Field(min_length=1, max_length=500)
     static: bool

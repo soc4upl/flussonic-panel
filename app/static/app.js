@@ -35,6 +35,8 @@ const state = {
   placementSelected: new Set(),
   placementServerCounts: [],
   m3uPreview: null,
+  pendingChange: null,
+  channelCard: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -364,6 +366,7 @@ function renderStreams() {
       </div></td>
       <td><span class="mono">${stream.position}</span></td>
       <td><div class="row-actions">
+        <button class="row-action card-action" title="Карточка канала">▣</button>
         <button class="row-action inputs-action" title="Редактировать input">⇄</button>
         <button class="row-action compare-action" title="Сравнить серверы">◎</button>
         <button class="row-action preview-action" title="Просмотр">▶</button>
@@ -382,6 +385,7 @@ function wireStreamRows() {
   $$('#streams-body tr').forEach(row => {
     const name = row.dataset.name;
     $('.stream-select', row)?.addEventListener('change', event => { event.target.checked ? state.selectedStreams.add(name) : state.selectedStreams.delete(name); updateBulkState(); });
+    $('.card-action', row)?.addEventListener('click', () => openChannelCard(name));
     $('.inputs-action', row)?.addEventListener('click', () => openInputs(name));
     $('.compare-action', row)?.addEventListener('click', () => openCompare(name));
     $('.preview-action', row)?.addEventListener('click', () => openPreview(name));
@@ -1387,45 +1391,33 @@ function updateBulkState() {
 async function setStreamsMode(names, makeStatic, button = null) {
   if (!names.length) return;
   const label = makeStatic ? 'Static' : 'On demand';
-  if (names.length > 1 && !window.confirm(`Перевести выбранные ${names.length} каналов в режим ${label}?`)) return;
-  setBusy(button, true, '…');
-  try {
-    const result = await api('/api/stream-mode', { method: 'PUT', body: JSON.stringify({ names, static: makeStatic }) });
-    const message = result.ok
-      ? `${label}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
-      : `${label}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
-    toast(message, result.ok ? 'success' : 'error', 6500);
-    await loadStreams();
-  } catch (error) {
-    toast(error.message, 'error', 7000);
-  } finally {
-    setBusy(button, false);
-    updateBulkState();
-  }
+  await openDryRun({ names, operation: 'set_static', value: makeStatic }, async () => {
+    setBusy(button, true, '…');
+    try {
+      const result = await api('/api/stream-mode', { method: 'PUT', body: JSON.stringify({ names, static: makeStatic }) });
+      const message = result.ok
+        ? `${label}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
+        : `${label}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
+      toast(message, result.ok ? 'success' : 'error', 6500);
+      await loadStreams();
+    } finally { setBusy(button, false); updateBulkState(); }
+  });
 }
 
 async function setStreamsDisabled(names, disabled, button = null) {
   if (!names.length) return;
-  const action = disabled ? 'временно отключить' : 'включить';
   const actionLabel = disabled ? 'Отключено' : 'Включено';
-  const question = names.length > 1
-    ? `${disabled ? 'Временно отключить' : 'Включить'} выбранные ${names.length} каналов?`
-    : `${disabled ? 'Временно отключить' : 'Включить'} поток «${names[0]}»?`;
-  if (!window.confirm(question)) return;
-  setBusy(button, true, '…');
-  try {
-    const result = await api('/api/stream-state', { method: 'PUT', body: JSON.stringify({ names, disabled }) });
-    const message = result.ok
-      ? `${actionLabel}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
-      : `${actionLabel}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
-    toast(message, result.ok ? 'success' : 'error', 6500);
-    await loadStreams();
-  } catch (error) {
-    toast(`Не удалось ${action} поток: ${error.message}`, 'error', 7000);
-  } finally {
-    setBusy(button, false);
-    updateBulkState();
-  }
+  await openDryRun({ names, operation: 'set_disabled', value: disabled }, async () => {
+    setBusy(button, true, '…');
+    try {
+      const result = await api('/api/stream-state', { method: 'PUT', body: JSON.stringify({ names, disabled }) });
+      const message = result.ok
+        ? `${actionLabel}: ${result.stream_count} каналов · изменено на ${result.changed_count} CDN`
+        : `${actionLabel}: ${result.stream_count} каналов · изменений ${result.changed_count}, ошибок ${result.failure_count}`;
+      toast(message, result.ok ? 'success' : 'error', 6500);
+      await loadStreams();
+    } finally { setBusy(button, false); updateBulkState(); }
+  });
 }
 
 function openBulk() {
@@ -1457,15 +1449,108 @@ async function saveBulk(event) {
   let value = $('#bulk-value').value.trim();
   if (operation === 'set_static') value = ['true','1','yes','on'].includes(value.toLowerCase());
   if (!['sync','delete'].includes(operation) && value === '') return toast('Введите значение', 'error');
-  if (operation === 'delete' && !confirm(`Удалить ${state.selectedStreams.size} потоков на выбранных серверах? Резервные копии будут сохранены.`)) return;
-  setBusy(button, true, 'Выполнение…');
-  try {
-    const result = await api('/api/bulk', { method: 'POST', body: JSON.stringify({ names: [...state.selectedStreams], operation, value, target_ids: targets, source_id: state.primaryId }) });
-    toast(result.ok ? `Готово: ${result.success_count}` : `Частично: ${result.success_count}, ошибок ${result.failure_count}`, result.ok ? 'success' : 'error', 7000);
-    $('#bulk-dialog').close(); state.selectedStreams.clear(); await loadStreams();
-  } catch (error) { toast(error.message, 'error', 7000); }
-  finally { setBusy(button, false); updateBulkState(); }
+  const payload = { names: [...state.selectedStreams], operation, value, target_ids: targets, source_id: state.primaryId };
+  $('#bulk-dialog').close();
+  await openDryRun(payload, async () => {
+    setBusy(button, true, 'Выполнение…');
+    try {
+      const result = await api('/api/bulk', { method: 'POST', body: JSON.stringify(payload) });
+      toast(result.ok ? `Готово: ${result.success_count}` : `Частично: ${result.success_count}, ошибок ${result.failure_count}`, result.ok ? 'success' : 'error', 7000);
+      state.selectedStreams.clear(); await loadStreams();
+    } finally { setBusy(button, false); updateBulkState(); }
+  });
 }
+
+
+const changeOperationLabels = {
+  add_input: 'Добавить резервный input', set_provider: 'Изменить provider', set_on_play: 'Изменить on_play',
+  set_static: 'Изменить Static / On demand', set_disabled: 'Включить / отключить поток', delete: 'Удалить поток', sync: 'Синхронизировать'
+};
+
+function prettyChangeValue(value) {
+  if (value === undefined || value === null || value === '') return '—';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'object') return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+function renderDryRun(data) {
+  $('#dryrun-operation').textContent = changeOperationLabels[data.operation] || data.operation;
+  $('#dryrun-summary').innerHTML = `
+    <article><span>Потоков</span><strong>${data.stream_count}</strong></article>
+    <article><span>CDN проверено</span><strong>${data.target_count}</strong></article>
+    <article><span>Изменений</span><strong>${data.change_count}</strong></article>
+    <article><span>Без изменений</span><strong>${data.unchanged_count}</strong></article>
+    <article class="${data.failure_count ? 'danger-text' : ''}"><span>Ошибок</span><strong>${data.failure_count}</strong></article>`;
+  $('#dryrun-body').innerHTML = data.items.map(item => {
+    const status = !item.ok ? `<span class="status-pill error">Ошибка</span>` : item.changed ? `<span class="status-pill waiting">Изменится</span>` : `<span class="status-pill alive">Без изменений</span>`;
+    const changes = item.changes?.length ? item.changes.map(change => `<div class="diff-line"><strong>${escapeHtml(change.field)}</strong><div><del>${escapeHtml(prettyChangeValue(change.before))}</del><span>→</span><ins>${escapeHtml(prettyChangeValue(change.after))}</ins></div></div>`).join('') : `<span class="muted">${escapeHtml(item.error || 'Конфигурация уже соответствует выбранному действию')}</span>`;
+    return `<article class="dryrun-item ${item.ok ? '' : 'has-error'}"><header><div><strong>${escapeHtml(item.stream_name)}</strong><span>${escapeHtml(item.server_name)}</span></div>${status}</header>${changes}${item.note ? `<p class="muted small">${escapeHtml(item.note)}</p>` : ''}</article>`;
+  }).join('') || '<div class="empty-state"><p>Изменений нет</p></div>';
+  $('#dryrun-apply-btn').disabled = data.failure_count > 0 || data.change_count === 0;
+}
+
+async function openDryRun(payload, applyCallback) {
+  $('#dryrun-body').innerHTML = '<div class="loading-card">Анализ конфигурации… Никакие изменения ещё не применяются.</div>';
+  $('#dryrun-summary').innerHTML = '';
+  $('#dryrun-operation').textContent = changeOperationLabels[payload.operation] || payload.operation;
+  $('#dryrun-apply-btn').disabled = true;
+  state.pendingChange = { payload, applyCallback };
+  $('#dryrun-dialog').showModal();
+  try {
+    const data = await api('/api/changes/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+    state.pendingChange.preview = data;
+    renderDryRun(data);
+  } catch (error) {
+    $('#dryrun-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+    toast(`Dry Run: ${error.message}`, 'error', 7000);
+  }
+}
+
+async function applyPendingChange() {
+  const pending = state.pendingChange;
+  if (!pending?.applyCallback || !pending.preview || pending.preview.failure_count) return;
+  const button = $('#dryrun-apply-btn');
+  setBusy(button, true, 'Применение…');
+  try {
+    await pending.applyCallback();
+    $('#dryrun-dialog').close();
+    state.pendingChange = null;
+  } catch (error) { toast(error.message, 'error', 7000); }
+  finally { setBusy(button, false); }
+}
+
+function bitrateLabel(value) {
+  const bps = Number(value || 0);
+  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`;
+  if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} Mbps`;
+  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} kbps`;
+  return `${bps} bps`;
+}
+
+async function openChannelCard(name) {
+  $('#channel-card-title').textContent = name;
+  $('#channel-card-content').innerHTML = '<div class="loading-card">Собираю состояние канала со всех CDN…</div>';
+  $('#channel-card-dialog').showModal();
+  try {
+    const data = await api(`/api/channel-card/${encodeURIComponent(name)}?server_id=${encodeURIComponent(state.selectedServerId || '')}`);
+    state.channelCard = data;
+    const stream = data.stream || {}; const summary = data.summary || {}; const placement = data.placement || {};
+    const inputs = (stream.inputs || []).map((item, index) => `<div class="channel-input"><span>${index + 1}</span><code>${escapeHtml(item.url)}</code></div>`).join('') || '<span class="muted">Input не найден</span>';
+    const servers = (data.servers || []).map(node => `<tr><td><strong>${escapeHtml(node.server_name)}</strong>${node.role === 'primary' ? '<span class="soft-badge">primary</span>' : ''}</td><td>${node.expected ? 'нужен' : 'не назначен'}</td><td>${node.present ? '<span class="status-pill alive">есть</span>' : '<span class="status-pill">нет</span>'}</td><td>${escapeHtml(node.status || '—')}</td><td>${node.clients || 0}</td><td>${bitrateLabel(node.output_bitrate)}</td></tr>`).join('');
+    const history = (data.audit || []).map(item => `<li><span>${formatDate(item.ts)}</span><div><strong>${escapeHtml(item.summary)}</strong><small>${escapeHtml(item.actor || '')}</small></div></li>`).join('') || '<li class="muted">Истории пока нет</li>';
+    const backups = (data.backups || []).map(item => `<li><span>${formatDate(item.ts)}</span><div><strong>${escapeHtml(item.server_name)}</strong><small>${escapeHtml(item.action)}</small></div></li>`).join('') || '<li class="muted">Резервных копий пока нет</li>';
+    $('#channel-card-content').innerHTML = `
+      <div class="channel-hero"><div><p class="eyebrow">${escapeHtml(stream.name || name)}</p><h3>${escapeHtml(stream.title || name)}</h3><p class="muted">${escapeHtml(stream.provider || 'без provider')} · ${stream.static ? 'Static' : 'On demand'} · ${stream.disabled ? 'временно отключён' : 'включён'}</p></div><div class="channel-actions"><button class="btn ghost small" id="card-preview-btn">▶ Preview</button><button class="btn ghost small" id="card-inputs-btn">⇄ Inputs</button><button class="btn ghost small" id="card-diagnostics-btn">⚙ Диагностика</button><button class="btn primary small" id="card-edit-btn">✎ Изменить</button></div></div>
+      <div class="channel-metrics"><article><span>Размещение</span><strong>${placement.effective_mode === 'assigned' ? escapeHtml(placement.primary_server_name || 'назначено') : 'Зеркало'}</strong></article><article><span>CDN</span><strong>${summary.present || 0}/${summary.expected || 0}</strong></article><article><span>Clients</span><strong>${summary.clients || 0}</strong></article><article><span>Output</span><strong>${bitrateLabel(summary.output_bitrate)}</strong></article></div>
+      <div class="channel-card-grid"><section><h3>Inputs</h3><div class="channel-inputs">${inputs}</div><h3>Состояние на CDN</h3><div class="table-wrap compact-table"><table><thead><tr><th>CDN</th><th>Назначение</th><th>Поток</th><th>Статус</th><th>Clients</th><th>Output</th></tr></thead><tbody>${servers}</tbody></table></div></section><aside><h3>Последние изменения</h3><ul class="channel-timeline">${history}</ul><h3>Последние backup</h3><ul class="channel-timeline">${backups}</ul></aside></div>`;
+    $('#card-preview-btn').addEventListener('click', () => { $('#channel-card-dialog').close(); openPreview(name); });
+    $('#card-inputs-btn').addEventListener('click', () => { $('#channel-card-dialog').close(); openInputs(name); });
+    $('#card-diagnostics-btn').addEventListener('click', () => { $('#channel-card-dialog').close(); openDiagnostics(name); });
+    $('#card-edit-btn').addEventListener('click', () => { $('#channel-card-dialog').close(); openStreamModal(name); });
+  } catch (error) { $('#channel-card-content').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`; }
+}
+
 
 async function openPreview(name) {
   $('#preview-title').textContent = name;
@@ -1955,6 +2040,7 @@ $('#sync-stream-btn').addEventListener('click', syncCurrentStream);
 $('#confirm-delete-btn').addEventListener('click', deleteCurrentStream);
 $('#mobile-menu').addEventListener('click', () => $('.sidebar').classList.toggle('open'));
 $$('.nav-item').forEach(item => item.addEventListener('click', () => switchView(item.dataset.view)));
+$('#dryrun-apply-btn')?.addEventListener('click', applyPendingChange);
 $$('.modal-close').forEach(button => button.addEventListener('click', () => { const dialog=button.closest('dialog'); if(dialog.id==='preview-dialog') $('#preview-frame').src='about:blank'; dialog.close(); }));
 $('#select-all-streams').addEventListener('change', e => { filteredStreams().forEach(x => e.target.checked ? state.selectedStreams.add(x.name) : state.selectedStreams.delete(x.name)); renderStreams(); updateBulkState(); });
 $('#bulk-ondemand-btn').addEventListener('click', event => setStreamsMode([...state.selectedStreams], false, event.currentTarget));

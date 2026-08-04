@@ -23,7 +23,7 @@ class SourceMonitor:
         self._lock = asyncio.Lock()
         self._server_state: dict[str, bool] = {}
         limits = httpx.Limits(max_connections=max(20, settings.source_check_concurrency * 2), max_keepalive_connections=20)
-        headers = {"User-Agent": "Cyrius-Source-Check/5.9.4"}
+        headers = {"User-Agent": "Cyrius-Source-Check/5.10.0"}
         self._http = {
             True: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=True, follow_redirects=True, limits=limits, headers=headers),
             False: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=False, follow_redirects=True, limits=limits, headers=headers),

@@ -438,10 +438,26 @@ http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и
     </form>
   </dialog>
 
+
+  <dialog id="dryrun-dialog" class="modal wide-modal dryrun-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ЦЕНТР ИЗМЕНЕНИЙ · DRY RUN</p><h2 id="dryrun-operation">Предпросмотр изменений</h2><p class="muted">На этом этапе панель только читает конфигурацию. PUT/DELETE и backup не выполняются.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body"><div id="dryrun-summary" class="dryrun-summary"></div><div id="dryrun-body" class="dryrun-list"></div></div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><span class="modal-spacer"></span><button id="dryrun-apply-btn" type="button" class="btn primary" disabled>Применить изменения</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="channel-card-dialog" class="modal channel-card-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">КАРТОЧКА КАНАЛА</p><h2 id="channel-card-title">Поток</h2><p class="muted">Конфигурация, размещение, нагрузка и история в одном окне.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div id="channel-card-content" class="modal-body"></div>
+    </div>
+  </dialog>
+
   <dialog id="preview-dialog" class="modal preview-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">LIVE PREVIEW</p><h2 id="preview-title">Просмотр канала</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><iframe id="preview-frame" class="preview-frame" allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe><div class="preview-links"><a id="preview-hls" target="_blank" rel="noopener">HLS</a><a id="preview-llhls" target="_blank" rel="noopener">LL-HLS</a></div><p class="muted small">Если поток защищён on_play-авторизацией, встроенный просмотр может потребовать пользовательский token.</p></div></div></dialog>
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=594" defer></script>
+  <script src="/static/app.js?v=510" defer></script>
 </body>
 </html>
