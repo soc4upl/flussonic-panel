@@ -24,12 +24,13 @@ from .source_monitor import SourceMonitor
 from .server_store import ServerStore, ServerStoreError
 from .cluster_store import ClusterStore, ClusterStoreError
 from .m3u_import import parse_m3u
+from .placement import build_batch_plan
 from .models import (
     InputsUpdate, LoginRequest, ReorderRequest, StreamCreate, StreamPatch, SyncRequest,
     ServerCreate, ServerUpdate, ServerTestRequest, BulkOperationRequest,
     NotificationSettingsUpdate, NotificationTestRequest, SourceActionRequest,
     ClusterSettingsUpdate, PlacementSettingsUpdate, PlacementAssignmentUpdate,
-    PlacementBulkUpdate, PlacementApplyRequest, M3UImportRequest, StreamModeBulkRequest,
+    PlacementBulkUpdate, PlacementApplyRequest, PlacementPlanRequest, PlacementTargetPickRequest, PlacementMigrationRequest, M3UImportRequest, StreamModeBulkRequest,
     StreamStateBulkRequest, ChangePreviewRequest,
 )
 
@@ -54,7 +55,7 @@ async def lifespan(_: FastAPI):
         await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.10.0", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.13.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -171,7 +172,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.10.0", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.13.1", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -526,15 +527,88 @@ async def changes_dry_run(payload: ChangePreviewRequest, _: Session = Depends(re
     }
 
 
+def _aggregate_stream_rows(rows: list[tuple[FlussonicServer, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """Collapse duplicate channel names from multiple CDN into one row for the ВСЕ view."""
+    grouped: dict[str, list[tuple[FlussonicServer, dict[str, Any]]]] = {}
+    for server, items in rows:
+        for item in items:
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            grouped.setdefault(name, []).append((server, item))
+
+    primary = server_store.primary()
+    result: list[dict[str, Any]] = []
+    for name, nodes in grouped.items():
+        placement = placement_public(name)
+        preferred_id = placement.get("primary_server_id") if placement.get("effective_mode") == "assigned" else (primary.id if primary else None)
+        reference_server, reference_item = next(((server, item) for server, item in nodes if server.id == preferred_id), nodes[0])
+        item = dict(reference_item)
+        server_ids = [server.id for server, _ in nodes]
+        server_names = [server.name for server, _ in nodes]
+        alive_nodes = [node for _, node in nodes if node.get("alive")]
+        waiting_nodes = [node for _, node in nodes if node.get("status") == "waiting"]
+        item.update({
+            "alive": bool(alive_nodes),
+            "running": any(bool(node.get("running")) for _, node in nodes),
+            "status": (alive_nodes[0].get("status") if alive_nodes else ("waiting" if waiting_nodes else reference_item.get("status", "unknown"))),
+            "placement": placement,
+            "server_ids": server_ids,
+            "server_names": server_names,
+            "server_count": len(server_ids),
+            "reference_server_id": reference_server.id,
+            "reference_server_name": reference_server.name,
+        })
+        result.append(item)
+    return sorted(result, key=lambda item: (item.get("position", 0), str(item.get("name", "")).lower()))
+
+
 @app.get("/api/streams")
 async def streams(server_id: str | None = None, search: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
-    server=get_server(server_id)
-    try: items=await client.list_streams(server)
-    except FlussonicError as exc: raise HTTPException(502,str(exc)) from exc
+    if server_id == "all":
+        servers = server_store.enabled()
+        if not servers:
+            raise HTTPException(409, "Сначала добавьте и включите Flussonic-сервер")
+
+        async def load_one(server: FlussonicServer) -> tuple[FlussonicServer, list[dict[str, Any]] | None, str | None]:
+            try:
+                return server, await client.list_streams(server), None
+            except FlussonicError as exc:
+                return server, None, str(exc)
+
+        loaded = await asyncio.gather(*(load_one(server) for server in servers))
+        rows = [(server, items) for server, items, error in loaded if items is not None]
+        errors = [{"server_id": server.id, "server_name": server.name, "error": error} for server, items, error in loaded if error]
+        if not rows:
+            detail = "; ".join(f"{item['server_name']}: {item['error']}" for item in errors) or "Нет доступных CDN"
+            raise HTTPException(502, detail)
+        items = _aggregate_stream_rows(rows)
+        if search:
+            needle = search.casefold()
+            items = [item for item in items if needle in str(item.get("name", "")).casefold() or needle in str(item.get("title", "")).casefold() or needle in str(item.get("provider", "")).casefold() or any(needle in str(inp.get("url", "")).casefold() for inp in item.get("inputs", []))]
+        return {
+            "server": {"id": "all", "name": "ВСЕ"},
+            "stats": {
+                "total": len(items),
+                "alive": sum(bool(item.get("alive")) for item in items),
+                "running": sum(bool(item.get("running")) for item in items),
+                "waiting": sum(item.get("status") == "waiting" for item in items),
+            },
+            "items": items,
+            "errors": errors,
+            "placement_enabled": placement_enabled(),
+        }
+
+    server = get_server(server_id)
+    try:
+        items = await client.list_streams(server)
+    except FlussonicError as exc:
+        raise HTTPException(502, str(exc)) from exc
     if search:
-        n=search.casefold(); items=[x for x in items if n in x["name"].casefold() or n in x.get("title","").casefold() or n in x.get("provider","").casefold() or any(n in i["url"].casefold() for i in x.get("inputs",[]))]
-    items=[dict(item, placement=placement_public(item["name"])) for item in items]
-    return {"server":{"id":server.id,"name":server.name},"stats":{"total":len(items),"alive":sum(x["alive"] for x in items),"running":sum(x["running"] for x in items),"waiting":sum(x["status"]=="waiting" for x in items)},"items":items,"placement_enabled":placement_enabled()}
+        n = search.casefold()
+        items = [x for x in items if n in x["name"].casefold() or n in x.get("title", "").casefold() or n in x.get("provider", "").casefold() or any(n in i["url"].casefold() for i in x.get("inputs", []))]
+    items = [dict(item, placement=placement_public(item["name"]), server_ids=[server.id], server_names=[server.name], server_count=1, reference_server_id=server.id, reference_server_name=server.name) for item in items]
+    return {"server": {"id": server.id, "name": server.name}, "stats": {"total": len(items), "alive": sum(x["alive"] for x in items), "running": sum(x["running"] for x in items), "waiting": sum(x["status"] == "waiting" for x in items)}, "items": items, "errors": [], "placement_enabled": placement_enabled()}
 
 @app.get("/api/streams/{name:path}")
 async def stream_detail(name: str, server_id: str | None = None, _: Session = Depends(require_session)) -> dict[str, Any]:
@@ -773,6 +847,564 @@ async def save_placement_bulk(payload:PlacementBulkUpdate,session:Session=Depend
     items=data_store.set_placements(stream_names=payload.names,mode=payload.mode,primary_server_id=payload.server_id,actor=session.username)
     data_store.audit(actor=session.username,action="placement_bulk_assign",entity_type="stream",entity_id=f"{len(payload.names)} streams",server_id=payload.server_id,status="success",summary=f"Назначено размещение для {len(payload.names)} потоков",details={"mode":payload.mode,"server_id":payload.server_id,"names":payload.names})
     return {"ok":True,"updated":len(items)}
+
+@app.post("/api/placement/plan")
+async def placement_plan(payload: PlacementPlanRequest, _: Session = Depends(require_session)) -> dict[str, Any]:
+    servers = list(server_store.enabled())
+    if payload.server_ids:
+        requested = set(payload.server_ids)
+        known = {server.id for server in servers}
+        missing = requested - known
+        if missing:
+            raise HTTPException(400, f"Неизвестные или отключённые CDN: {', '.join(sorted(missing))}")
+        servers = [server for server in servers if server.id in requested]
+    if not servers:
+        raise HTTPException(409, "Нет включённых CDN для планирования")
+
+    primary = server_store.primary()
+    if primary is None:
+        raise HTTPException(409, "Не назначен основной сервер для чтения списка каналов")
+    try:
+        configs = await client.list_stream_configs(primary)
+    except Exception as exc:
+        raise HTTPException(502, f"Не удалось прочитать список каналов с {primary.name}: {exc}") from exc
+
+    def sort_key(name: str) -> tuple[int, str]:
+        cfg = configs.get(name) or {}
+        try:
+            position = int(cfg.get("position") or 1_000_000_000)
+        except (TypeError, ValueError):
+            position = 1_000_000_000
+        return position, name.casefold()
+
+    candidates = [
+        name for name in sorted(configs, key=sort_key)
+        if (data_store.placement(name) or {}).get("mode", "mirror") == "mirror"
+    ]
+    placements = data_store.placements()
+    rows = []
+    for server in servers:
+        assigned = sum(
+            1 for item in placements.values()
+            if item.get("mode") == "assigned" and item.get("primary_server_id") == server.id
+        )
+        rows.append({"server_id": server.id, "server_name": server.name, "assigned": assigned})
+    plan = build_batch_plan(candidates, rows, batch_size=payload.batch_size)
+    return {"ok": True, "primary_server_id": primary.id, **plan}
+
+
+@app.post("/api/placement/pick")
+async def placement_pick(payload: PlacementTargetPickRequest, _: Session = Depends(require_session)) -> dict[str, Any]:
+    """Select the next N streams that are still in mirror mode for one target CDN.
+
+    This is intentionally non-destructive: it only returns a deterministic selection.
+    The actual move still goes through migration Dry Run and explicit apply.
+    """
+    target = server_store.get(payload.server_id)
+    if target is None or not target.enabled:
+        raise HTTPException(400, "Целевой CDN не найден или отключён")
+
+    primary = server_store.primary()
+    if primary is None:
+        raise HTTPException(409, "Не назначен основной сервер для чтения списка каналов")
+    try:
+        configs = await client.list_stream_configs(primary)
+    except Exception as exc:
+        raise HTTPException(502, f"Не удалось прочитать список каналов с {primary.name}: {exc}") from exc
+
+    def sort_key(name: str) -> tuple[int, str]:
+        cfg = configs.get(name) or {}
+        try:
+            position = int(cfg.get("position") or 1_000_000_000)
+        except (TypeError, ValueError):
+            position = 1_000_000_000
+        return position, name.casefold()
+
+    candidates = [
+        name for name in sorted(configs, key=sort_key)
+        if (data_store.placement(name) or {}).get("mode", "mirror") == "mirror"
+    ]
+    names = candidates[:payload.count]
+    assigned_before = sum(
+        1 for item in data_store.placements().values()
+        if item.get("mode") == "assigned" and item.get("primary_server_id") == target.id
+    )
+    return {
+        "ok": True,
+        "server_id": target.id,
+        "server_name": target.name,
+        "requested_count": payload.count,
+        "candidate_count": len(candidates),
+        "selected_count": len(names),
+        "remaining_after": max(0, len(candidates) - len(names)),
+        "assigned_before": assigned_before,
+        "assigned_after_if_applied": assigned_before + len(names),
+        "names": names,
+    }
+
+
+async def _placement_config_maps(servers: list[FlussonicServer]) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, str]]:
+    async def load(server: FlussonicServer):
+        try:
+            return server, await client.list_stream_configs(server), None
+        except Exception as exc:
+            return server, {}, str(exc)
+    loaded = await asyncio.gather(*(load(server) for server in servers))
+    maps = {server.id: configs for server, configs, _ in loaded}
+    errors = {server.id: str(error) for server, _, error in loaded if error}
+    return maps, errors
+
+
+def _migration_reference(name: str, target: FlussonicServer, servers: list[FlussonicServer], maps: dict[str, dict[str, dict[str, Any]]]) -> dict[str, Any] | None:
+    target_cfg = maps.get(target.id, {}).get(name)
+    if target_cfg:
+        return target_cfg
+    primary = server_store.primary()
+    if primary and maps.get(primary.id, {}).get(name):
+        return maps[primary.id][name]
+    return next((maps.get(server.id, {}).get(name) for server in servers if maps.get(server.id, {}).get(name)), None)
+
+
+@app.post("/api/placement/migrate/dry-run")
+async def placement_migration_dry_run(payload: PlacementMigrationRequest, _: Session = Depends(require_session)) -> dict[str, Any]:
+    target = server_store.get(payload.server_id)
+    if target is None or not target.enabled:
+        raise HTTPException(400, "Целевой CDN не найден или отключён")
+    servers = list(server_store.enabled())
+    maps, errors = await _placement_config_maps(servers)
+    cluster = cluster_store.get()
+    peer_ids = {str(item.get("server_id")) for item in cluster.get("peers") or []}
+    peer_ready = bool(cluster.get("enabled")) and all(server.id in peer_ids for server in servers)
+    warnings: list[str] = []
+    if not peer_ready:
+        warnings.append("В настройках панели не все включённые CDN отмечены как peer. После удаления копий проверьте открытие каналов через ваш обычный LB URL.")
+    if errors:
+        warnings.append("Часть CDN недоступна для чтения. Миграция будет заблокирована, пока панель не сможет проверить все серверы.")
+
+    items: list[dict[str, Any]] = []
+    for name in payload.names:
+        present = [server for server in servers if maps.get(server.id, {}).get(name)]
+        reference = _migration_reference(name, target, servers, maps)
+        item_errors = [f"{next((s.name for s in servers if s.id == sid), sid)}: {error}" for sid, error in errors.items()]
+        if reference is None:
+            item_errors.append("Конфигурация потока не найдена ни на одном CDN")
+        target_current = maps.get(target.id, {}).get(name)
+        target_same = bool(reference and target_current and client.config_hash(target_current) == client.config_hash(reference))
+        extras = [server for server in present if server.id != target.id]
+        placement = placement_public(name)
+        before_placement = placement.get("primary_server_name") if placement.get("configured_mode") == "assigned" else "Зеркало"
+        changes = [
+            {"field": "Размещение", "before": before_placement, "after": target.name},
+            {"field": f"{target.name}: конфигурация", "before": "совпадает" if target_same else ("другая" if target_current else "нет"), "after": "проверена и готова"},
+            {"field": "Копии на CDN", "before": [server.name for server in present] or ["нигде"], "after": [target.name]},
+        ]
+        note = "Удалятся после проверки target: " + ", ".join(server.name for server in extras) if extras else "Лишних копий нет"
+        items.append({
+            "stream_name": name,
+            "server_id": target.id,
+            "server_name": target.name,
+            "ok": not item_errors,
+            "changed": bool(not target_same or extras or before_placement != target.name),
+            "operation": "placement_migrate",
+            "changes": changes,
+            "note": note,
+            "error": "; ".join(item_errors) if item_errors else None,
+            "target_write": not target_same,
+            "delete_count": len(extras),
+            "delete_servers": [server.name for server in extras],
+        })
+
+    failures = [item for item in items if not item["ok"]]
+    changed = [item for item in items if item["ok"] and item["changed"]]
+    return {
+        "ok": not failures,
+        "operation": "placement_migrate",
+        "stream_count": len(payload.names),
+        "target_count": sum(1 + int(item.get("delete_count") or 0) for item in items),
+        "change_count": len(changed),
+        "unchanged_count": sum(1 for item in items if item["ok"] and not item["changed"]),
+        "failure_count": len(failures),
+        "target_server_id": target.id,
+        "target_server_name": target.name,
+        "peer_ready": peer_ready,
+        "warnings": warnings,
+        "items": items,
+    }
+
+
+@app.post("/api/placement/migrate")
+async def placement_migrate(payload: PlacementMigrationRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
+    if not placement_enabled():
+        raise HTTPException(409, "Сначала включите гибридное распределение")
+    target = server_store.get(payload.server_id)
+    if target is None or not target.enabled:
+        raise HTTPException(400, "Целевой CDN не найден или отключён")
+    servers = list(server_store.enabled())
+    maps, errors = await _placement_config_maps(servers)
+    if errors:
+        detail = "; ".join(f"{next((s.name for s in servers if s.id == sid), sid)}: {error}" for sid, error in errors.items())
+        raise HTTPException(502, f"Миграция остановлена: не удалось проверить все CDN. {detail}")
+
+    snapshot = {"streams": {}}
+    for name in payload.names:
+        snapshot["streams"][name] = {
+            "placement": data_store.placement(name),
+            "servers": {
+                server.id: {
+                    "server_name": server.name,
+                    "present": bool(maps.get(server.id, {}).get(name)),
+                    "config": maps.get(server.id, {}).get(name),
+                } for server in servers
+            },
+        }
+    migration_id = data_store.create_migration_batch(
+        actor=session.username, target_server_id=target.id, target_server_name=target.name, snapshot=snapshot
+    )
+
+    stream_sem = asyncio.Semaphore(3)
+
+    async def process(name: str) -> dict[str, Any]:
+        async with stream_sem:
+            reference = _migration_reference(name, target, servers, maps)
+            if reference is None:
+                return {"stream_name": name, "ok": False, "stage": "reference", "error": "Конфигурация потока не найдена"}
+            body = dict(reference)
+            body.pop("name", None)
+            expected_hash = client.config_hash(reference)
+            actions: list[dict[str, Any]] = []
+            try:
+                target_current = maps.get(target.id, {}).get(name)
+                if not target_current or client.config_hash(target_current) != expected_hash:
+                    if target_current:
+                        await backup_stream(target, name, session.username, "migration_target_update")
+                    await client.put_stream(target, name, body)
+                    actions.append({"action": "target_write", "server_id": target.id, "server_name": target.name})
+                check = await client.get_stream(target, name)
+                actual = client.disk_config(check)
+                if client.config_hash(actual) != expected_hash:
+                    raise FlussonicError("Целевой CDN вернул другую конфигурацию после записи")
+                actions.append({"action": "target_verified", "server_id": target.id, "server_name": target.name})
+
+                # Target is already proven healthy at config level.  Persist desired
+                # placement before removing extras so a partial delete cannot make the
+                # panel treat the stream as a mirror and recreate removed copies.
+                placement = data_store.set_placement(
+                    stream_name=name,
+                    mode="assigned",
+                    primary_server_id=target.id,
+                    actor=session.username,
+                )
+                actions.append({"action": "placement_committed", "server_id": target.id, "server_name": target.name})
+
+                extras = [server for server in servers if server.id != target.id and maps.get(server.id, {}).get(name)]
+                for server in extras:
+                    await backup_stream(server, name, session.username, "migration_remove_extra")
+                    await client.delete_stream(server, name)
+                    actions.append({"action": "extra_deleted", "server_id": server.id, "server_name": server.name})
+
+                final_check = await client.get_stream(target, name)
+                if client.config_hash(client.disk_config(final_check)) != expected_hash:
+                    raise FlussonicError("Финальная проверка целевого CDN не прошла")
+                data_store.audit(
+                    actor=session.username,
+                    action="placement_migrate_stream",
+                    entity_type="stream",
+                    entity_id=name,
+                    server_id=target.id,
+                    status="success",
+                    summary=f"Поток {name} перенесён на {target.name}",
+                    details={"target": target.id, "actions": actions, "placement": placement},
+                )
+                return {"stream_name": name, "ok": True, "stage": "done", "target_server_id": target.id, "target_server_name": target.name, "actions": actions}
+            except Exception as exc:
+                data_store.audit(
+                    actor=session.username,
+                    action="placement_migrate_stream",
+                    entity_type="stream",
+                    entity_id=name,
+                    server_id=target.id,
+                    status="failed",
+                    summary=f"Не удалось перенести {name} на {target.name}",
+                    details={"target": target.id, "actions": actions, "error": str(exc)},
+                )
+                return {"stream_name": name, "ok": False, "stage": "apply", "target_server_id": target.id, "target_server_name": target.name, "actions": actions, "error": str(exc)}
+
+    results = list(await asyncio.gather(*(process(name) for name in payload.names)))
+    summary = operation_summary(results)
+    summary.update({"target_server_id": target.id, "target_server_name": target.name, "stream_count": len(payload.names), "migration_id": migration_id})
+    batch_status = "success" if summary["ok"] else "partial" if summary["success_count"] else "failed"
+    data_store.finish_migration_batch(migration_id, status=batch_status, result=summary)
+    data_store.audit(
+        actor=session.username,
+        action="placement_migrate_batch",
+        entity_type="stream",
+        entity_id=f"{len(payload.names)} streams",
+        server_id=target.id,
+        status="success" if summary["ok"] else "partial" if summary["success_count"] else "failed",
+        summary=f"Миграция на {target.name}: {summary['success_count']} успешно, {summary['failure_count']} ошибок",
+        details=summary,
+    )
+    return summary
+
+
+@app.get("/api/placement/migrations")
+async def placement_migrations(limit: int = Query(default=50, ge=1, le=200), _: Session = Depends(require_session)) -> dict[str, Any]:
+    return {"items": data_store.migration_batches(limit=limit)}
+
+
+def _migration_snapshot_reference(before: dict[str, Any], preferred_server_id: str | None) -> dict[str, Any] | None:
+    servers = before.get("servers") or {}
+    if preferred_server_id:
+        preferred = servers.get(preferred_server_id) or {}
+        if preferred.get("present") and preferred.get("config"):
+            return preferred.get("config")
+    for snap in servers.values():
+        if snap.get("present") and snap.get("config"):
+            return snap.get("config")
+    return None
+
+
+@app.post("/api/placement/migrations/{migration_id}/verify")
+async def placement_migration_verify(migration_id: int, _: Session = Depends(require_session)) -> dict[str, Any]:
+    batch = data_store.migration_batch(migration_id)
+    if batch is None:
+        raise HTTPException(404, "Миграция не найдена")
+    if batch.get("rolled_back_at"):
+        raise HTTPException(409, "Эта миграция уже откатана; проверяйте текущее размещение в разделе Размещение")
+
+    snapshot = batch.get("snapshot", {}).get("streams") or {}
+    if not snapshot:
+        raise HTTPException(409, "У этой миграции нет снимка для постпроверки")
+
+    all_servers = {server.id: server for server in server_store.all()}
+    snapshot_ids = {sid for item in snapshot.values() for sid in (item.get("servers") or {})}
+    current_enabled_ids = {server.id for server in server_store.enabled()}
+    relevant_ids = snapshot_ids | current_enabled_ids | {str(batch.get("target_server_id") or "")}
+    relevant_ids.discard("")
+    relevant = [all_servers[sid] for sid in relevant_ids if sid in all_servers and all_servers[sid].enabled]
+    maps, read_errors = await _placement_config_maps(relevant)
+
+    target_id = str(batch.get("target_server_id") or "")
+    target_name = str(batch.get("target_server_name") or target_id)
+    items: list[dict[str, Any]] = []
+    server_checks = 0
+
+    for name, before in snapshot.items():
+        expected_reference = _migration_snapshot_reference(before, target_id)
+        expected_hash = client.config_hash(expected_reference) if expected_reference else None
+        placement = data_store.placement(name)
+        placement_ok = bool(placement and placement.get("mode") == "assigned" and placement.get("primary_server_id") == target_id)
+        server_states: list[dict[str, Any]] = []
+        extras: list[str] = []
+        unreadable: list[str] = []
+        target_present = False
+        target_hash_ok = False if expected_hash else True
+
+        for server_id in sorted(relevant_ids, key=lambda sid: (all_servers.get(sid).name.casefold() if all_servers.get(sid) else sid.casefold())):
+            server = all_servers.get(server_id)
+            server_name = server.name if server else (before.get("servers", {}).get(server_id, {}).get("server_name") or server_id)
+            expected = server_id == target_id
+            server_checks += 1
+            if server is None or not server.enabled:
+                unreadable.append(server_name)
+                server_states.append({"server_id": server_id, "server_name": server_name, "expected": expected, "present": None, "state": "unavailable", "label": "сервер отсутствует/отключён"})
+                continue
+            if server_id in read_errors:
+                unreadable.append(server_name)
+                server_states.append({"server_id": server_id, "server_name": server_name, "expected": expected, "present": None, "state": "unavailable", "label": read_errors[server_id]})
+                continue
+            current = maps.get(server_id, {}).get(name)
+            present = current is not None
+            if expected:
+                target_present = present
+                if present and expected_hash:
+                    target_hash_ok = client.config_hash(current) == expected_hash
+                state = "ok" if present else "missing"
+                label = "назначен · есть" if present else "назначен · отсутствует"
+            elif present:
+                extras.append(server_name)
+                state = "extra"
+                label = "лишняя копия"
+            else:
+                state = "ok"
+                label = "нет · правильно"
+            server_states.append({"server_id": server_id, "server_name": server_name, "expected": expected, "present": present, "state": state, "label": label})
+
+        critical_reasons: list[str] = []
+        warning_reasons: list[str] = []
+        if not placement_ok:
+            critical_reasons.append("Размещение в панели не зафиксировано на целевом CDN")
+        if not target_present:
+            critical_reasons.append(f"Поток отсутствует на {target_name}")
+        elif expected_hash and not target_hash_ok:
+            critical_reasons.append(f"Конфигурация на {target_name} отличается от снимка до миграции")
+        if extras:
+            warning_reasons.append("Остались лишние копии: " + ", ".join(extras))
+        if unreadable:
+            warning_reasons.append("Не удалось проверить: " + ", ".join(unreadable))
+        if critical_reasons:
+            status = "critical"
+        elif warning_reasons:
+            status = "warning"
+        else:
+            status = "ok"
+
+        items.append({
+            "stream_name": name,
+            "target_server_id": target_id,
+            "target_server_name": target_name,
+            "status": status,
+            "placement_ok": placement_ok,
+            "target_present": target_present,
+            "target_config_ok": target_hash_ok,
+            "extras": extras,
+            "unreadable": unreadable,
+            "reasons": critical_reasons + warning_reasons,
+            "servers": server_states,
+        })
+
+    ok_count = sum(1 for item in items if item["status"] == "ok")
+    warning_count = sum(1 for item in items if item["status"] == "warning")
+    critical_count = sum(1 for item in items if item["status"] == "critical")
+    return {
+        "ok": critical_count == 0 and warning_count == 0,
+        "migration_id": migration_id,
+        "target_server_id": target_id,
+        "target_server_name": target_name,
+        "stream_count": len(items),
+        "server_checks": server_checks,
+        "ok_count": ok_count,
+        "warning_count": warning_count,
+        "critical_count": critical_count,
+        "checked_at": int(time.time()),
+        "items": items,
+    }
+
+
+def _rollback_preview(batch: dict[str, Any], maps: dict[str, dict[str, dict[str, Any]]], servers_by_id: dict[str, FlussonicServer]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for name, before in (batch.get("snapshot", {}).get("streams") or {}).items():
+        changes: list[dict[str, Any]] = []
+        errors: list[str] = []
+        desired_servers = before.get("servers") or {}
+        touched = 0
+        for server_id, snap in desired_servers.items():
+            server = servers_by_id.get(server_id)
+            if server is None or not server.enabled:
+                errors.append(f"Сервер {snap.get('server_name') or server_id} отсутствует или отключён")
+                continue
+            current = maps.get(server_id, {}).get(name)
+            desired = snap.get("config") if snap.get("present") else None
+            if desired is not None:
+                if current is None or client.config_hash(current) != client.config_hash(desired):
+                    changes.append({"field": f"{server.name}: поток", "before": "нет" if current is None else "изменён", "after": "восстановить конфигурацию"})
+                    touched += 1
+            elif current is not None:
+                changes.append({"field": f"{server.name}: поток", "before": "есть", "after": "удалить (до миграции отсутствовал)"})
+                touched += 1
+        current_placement = data_store.placement(name)
+        original_placement = before.get("placement")
+        cur_mode = (current_placement or {}).get("mode", "mirror")
+        cur_server = (current_placement or {}).get("primary_server_id")
+        old_mode = (original_placement or {}).get("mode", "mirror")
+        old_server = (original_placement or {}).get("primary_server_id")
+        if (cur_mode, cur_server) != (old_mode, old_server) or (current_placement is None) != (original_placement is None):
+            changes.append({"field": "Размещение", "before": f"{cur_mode}:{cur_server or '-'}", "after": f"{old_mode}:{old_server or '-'}"})
+        items.append({
+            "stream_name": name, "server_id": batch.get("target_server_id"), "server_name": batch.get("target_server_name"),
+            "ok": not errors, "changed": bool(changes), "operation": "placement_rollback", "changes": changes,
+            "note": f"Будет восстановлено состояние до миграции #{batch['id']}", "error": "; ".join(errors) if errors else None,
+            "target_count": max(1, touched),
+        })
+    failures = [item for item in items if not item["ok"]]
+    return {
+        "ok": not failures, "operation": "placement_rollback", "migration_id": batch["id"],
+        "stream_count": len(items), "target_count": sum(item.get("target_count", 1) for item in items),
+        "change_count": sum(1 for item in items if item["ok"] and item["changed"]),
+        "unchanged_count": sum(1 for item in items if item["ok"] and not item["changed"]),
+        "failure_count": len(failures), "warnings": ["Откат восстановит конфигурации и размещение, сохранённые непосредственно перед этой миграцией."],
+        "items": items,
+    }
+
+
+@app.post("/api/placement/migrations/{migration_id}/rollback/dry-run")
+async def placement_rollback_dry_run(migration_id: int, _: Session = Depends(require_session)) -> dict[str, Any]:
+    batch = data_store.migration_batch(migration_id)
+    if batch is None:
+        raise HTTPException(404, "Миграция не найдена")
+    if batch.get("rolled_back_at"):
+        raise HTTPException(409, "Эта миграция уже полностью откатана")
+    snapshot_servers = {sid for item in (batch.get("snapshot", {}).get("streams") or {}).values() for sid in (item.get("servers") or {})}
+    servers_by_id = {server.id: server for server in server_store.all()}
+    relevant = [servers_by_id[sid] for sid in snapshot_servers if sid in servers_by_id and servers_by_id[sid].enabled]
+    maps, errors = await _placement_config_maps(relevant)
+    missing = snapshot_servers - {server.id for server in relevant}
+    if errors or missing:
+        details = [f"{sid}: {err}" for sid, err in errors.items()] + [f"{sid}: сервер отсутствует/отключён" for sid in sorted(missing)]
+        raise HTTPException(502, "Откат остановлен: " + "; ".join(details))
+    return _rollback_preview(batch, maps, servers_by_id)
+
+
+@app.post("/api/placement/migrations/{migration_id}/rollback")
+async def placement_rollback(migration_id: int, session: Session = Depends(require_session)) -> dict[str, Any]:
+    batch = data_store.migration_batch(migration_id)
+    if batch is None:
+        raise HTTPException(404, "Миграция не найдена")
+    if batch.get("rolled_back_at"):
+        raise HTTPException(409, "Эта миграция уже полностью откатана")
+    snapshot = batch.get("snapshot", {}).get("streams") or {}
+    snapshot_servers = {sid for item in snapshot.values() for sid in (item.get("servers") or {})}
+    servers_by_id = {server.id: server for server in server_store.all()}
+    relevant = [servers_by_id[sid] for sid in snapshot_servers if sid in servers_by_id and servers_by_id[sid].enabled]
+    maps, errors = await _placement_config_maps(relevant)
+    missing = snapshot_servers - {server.id for server in relevant}
+    if errors or missing:
+        details = [f"{sid}: {err}" for sid, err in errors.items()] + [f"{sid}: сервер отсутствует/отключён" for sid in sorted(missing)]
+        raise HTTPException(502, "Откат остановлен: " + "; ".join(details))
+    sem = asyncio.Semaphore(3)
+
+    async def restore(name: str, before: dict[str, Any]) -> dict[str, Any]:
+        async with sem:
+            actions: list[dict[str, Any]] = []
+            try:
+                for server_id, snap in (before.get("servers") or {}).items():
+                    server = servers_by_id[server_id]
+                    current = maps.get(server_id, {}).get(name)
+                    desired = snap.get("config") if snap.get("present") else None
+                    if desired is not None:
+                        if current is None or client.config_hash(current) != client.config_hash(desired):
+                            if current is not None:
+                                await backup_stream(server, name, session.username, "migration_rollback_overwrite")
+                            body = dict(desired); body.pop("name", None)
+                            await client.put_stream(server, name, body)
+                            check = client.disk_config(await client.get_stream(server, name))
+                            if client.config_hash(check) != client.config_hash(desired):
+                                raise FlussonicError(f"{server.name}: конфигурация после восстановления не совпадает")
+                            actions.append({"action": "restored", "server_id": server.id, "server_name": server.name})
+                    elif current is not None:
+                        await backup_stream(server, name, session.username, "migration_rollback_remove")
+                        await client.delete_stream(server, name)
+                        actions.append({"action": "removed", "server_id": server.id, "server_name": server.name})
+                original = before.get("placement")
+                if original is None:
+                    data_store.delete_placement(name)
+                    actions.append({"action": "placement_removed"})
+                else:
+                    data_store.set_placement(stream_name=name, mode=original.get("mode") or "mirror", primary_server_id=original.get("primary_server_id"), actor=session.username)
+                    actions.append({"action": "placement_restored", "mode": original.get("mode") or "mirror", "server_id": original.get("primary_server_id")})
+                data_store.audit(actor=session.username, action="placement_rollback_stream", entity_type="stream", entity_id=name, server_id=batch.get("target_server_id"), status="success", summary=f"{name} восстановлен из миграции #{migration_id}", details={"migration_id": migration_id, "actions": actions})
+                return {"stream_name": name, "ok": True, "actions": actions}
+            except Exception as exc:
+                data_store.audit(actor=session.username, action="placement_rollback_stream", entity_type="stream", entity_id=name, server_id=batch.get("target_server_id"), status="failed", summary=f"Ошибка отката {name} из миграции #{migration_id}", details={"migration_id": migration_id, "actions": actions, "error": str(exc)})
+                return {"stream_name": name, "ok": False, "actions": actions, "error": str(exc)}
+
+    results = list(await asyncio.gather(*(restore(name, before) for name, before in snapshot.items())))
+    summary = operation_summary(results)
+    summary.update({"migration_id": migration_id, "stream_count": len(snapshot)})
+    data_store.mark_migration_rollback(migration_id, actor=session.username, result=summary, complete=summary["ok"])
+    data_store.audit(actor=session.username, action="placement_rollback_batch", entity_type="migration", entity_id=str(migration_id), server_id=batch.get("target_server_id"), status="success" if summary["ok"] else "partial" if summary["success_count"] else "failed", summary=f"Откат миграции #{migration_id}: {summary['success_count']} успешно, {summary['failure_count']} ошибок", details=summary)
+    return summary
+
 
 @app.post("/api/placement/apply")
 async def apply_placement(payload:PlacementApplyRequest,session:Session=Depends(require_session))->dict[str,Any]:

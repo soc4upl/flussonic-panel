@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1020">
   <title>Cyrius Stream Control</title>
-  <link rel="stylesheet" href="/static/styles.css?v=594">
+  <link rel="stylesheet" href="/static/styles.css?v=513">
 </head>
 <body>
   <div id="toast-root" class="toast-root"></div>
@@ -51,6 +51,7 @@
         <button class="nav-item" data-view="backups"><span class="nav-icon">↶</span>Резервные копии</button>
         <button class="nav-item" data-view="audit"><span class="nav-icon">≡</span>История</button>
         <button class="nav-item" data-view="alerts"><span class="nav-icon">♢</span>Уведомления</button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span>Настройки</button>
       </nav>
       <div class="sidebar-footer">
         <div class="mini-profile">
@@ -69,6 +70,7 @@
           <h1 id="page-title">Потоки</h1>
         </div>
         <div class="top-actions">
+          <span id="panel-mode-badge" class="soft-badge panel-mode-badge">Зеркальный</span>
           <div id="last-refresh" class="last-refresh">Ещё не обновлялось</div>
           <button id="refresh-btn" class="btn ghost">↻ Обновить</button>
           <button id="import-m3u-btn" class="btn ghost">⇪ Импорт M3U</button>
@@ -78,7 +80,7 @@
 
       <section id="streams-view" class="view-section">
         <div id="metric-grid" class="metric-grid">
-          <article class="metric-card"><span class="metric-label">Всего потоков</span><strong id="metric-total">—</strong><span class="metric-foot">на выбранном сервере</span></article>
+          <article class="metric-card"><span class="metric-label">Всего потоков</span><strong id="metric-total">—</strong><span id="metric-total-foot" class="metric-foot">на выбранном сервере</span></article>
           <article class="metric-card"><span class="metric-label">Активны</span><strong id="metric-alive">—</strong><span class="metric-foot success">работают сейчас</span></article>
           <article class="metric-card"><span class="metric-label">Запущены</span><strong id="metric-running">—</strong><span class="metric-foot">running = true</span></article>
           <article class="metric-card"><span class="metric-label">Серверы онлайн</span><strong id="metric-servers">—</strong><span class="metric-foot" id="metric-servers-foot">проверка...</span></article>
@@ -279,14 +281,16 @@
         <div class="section-intro"><div><h2>Размещение каналов</h2><p>Постепенный переход: неназначенные каналы остаются зеркальными, назначенные работают только на выбранном CDN.</p></div><button id="placement-refresh-btn" class="btn primary">↻ Сканировать</button></div>
         <section class="panel placement-mode-panel">
           <div class="placement-mode-copy"><p class="eyebrow">МОДЕЛЬ РАБОТЫ</p><h3 id="placement-mode-title">Зеркальная</h3><p id="placement-mode-help" class="muted">Все каналы должны быть на всех включённых серверах.</p></div>
-          <label class="switch-row placement-main-switch"><input id="placement-enabled" type="checkbox"><span class="switch"></span><span><strong>Гибридное распределение</strong><small>Включайте для постепенного назначения каналов по CDN</small></span></label>
+          <input id="placement-enabled" type="checkbox" class="hidden" aria-hidden="true">
+          <button id="placement-open-settings" type="button" class="btn ghost">⚙ Изменить режим в Настройках</button>
         </section>
         <div class="metric-grid"><article class="metric-card"><span class="metric-label">Всего каналов</span><strong id="placement-total">—</strong></article><article class="metric-card"><span class="metric-label">Назначены CDN</span><strong id="placement-assigned">—</strong></article><article class="metric-card"><span class="metric-label">Остались зеркальными</span><strong id="placement-mirror">—</strong></article><article class="metric-card"><span class="metric-label">Требуют применения</span><strong id="placement-drift">—</strong></article></div>
-        <section class="panel"><div class="panel-head placement-toolbar"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="placement-filter" placeholder="Поиск канала"></label><select id="placement-status-filter" class="select"><option value="all">Все</option><option value="assigned">Назначенные</option><option value="mirror">Зеркальные</option><option value="drift">Требуют применения</option></select></div><div class="toolbar-right placement-actions"><select id="placement-server-select" class="select"><option value="">Выберите CDN</option></select><button id="placement-assign-btn" class="btn primary small" disabled>Назначить CDN</button><button id="placement-mirror-btn" class="btn ghost small" disabled>Вернуть в зеркало</button><label class="compact-check"><input id="placement-remove-extras" type="checkbox"> удалить лишние копии</label><button id="placement-apply-btn" class="btn ghost small" disabled>Применить</button><span id="placement-count" class="soft-badge">0</span></div></div><div class="placement-warning callout"><span>i</span><p><strong>Назначить CDN</strong> меняет только желаемое состояние. Кнопка <strong>Применить</strong> сначала создаёт/проверяет канал на целевом сервере. Старые копии удаляются только при отмеченной галочке.</p></div><div class="table-wrap"><table><thead><tr><th><input id="placement-select-all" type="checkbox"></th><th>Канал</th><th>Модель</th><th>Основной CDN</th><th>Фактически</th><th>Состояние</th></tr></thead><tbody id="placement-body"></tbody></table></div></section>
+        <section class="panel"><div class="panel-head placement-toolbar"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="placement-filter" placeholder="Поиск канала"></label><select id="placement-status-filter" class="select"><option value="all">Все</option><option value="assigned">Назначенные</option><option value="mirror">Зеркальные</option><option value="drift">Требуют применения</option></select><label class="migration-size"><span>Пачка</span><input id="placement-batch-size" type="number" min="1" max="500" value="100"></label><button id="placement-plan-btn" class="btn ghost small">План 100/CDN</button></div><div class="toolbar-right placement-actions"><select id="placement-server-select" class="select"><option value="">Выберите CDN</option></select><label class="migration-size placement-pick-size"><span>Взять</span><input id="placement-pick-count" type="number" min="1" max="500" value="100"></label><button id="placement-pick-btn" class="btn ghost small">Выбрать 100</button><button id="placement-migrate-btn" class="btn primary small" disabled>Перенести сейчас</button><button id="placement-assign-btn" class="btn ghost small" disabled>Только назначить</button><button id="placement-mirror-btn" class="btn ghost small" disabled>Вернуть в зеркало</button><label class="compact-check"><input id="placement-remove-extras" type="checkbox"> удалить лишние копии</label><button id="placement-apply-btn" class="btn ghost small" disabled>Применить назначение</button><span id="placement-count" class="soft-badge">0</span></div></div><div class="placement-warning callout"><span>i</span><p><strong>Выбрать N</strong> берёт следующие N ещё не мигрированных каналов на выбранный CDN. <strong>Перенести сейчас</strong> — безопасная миграция: target CDN сначала создаётся/проверяется, затем удаляются остальные копии, и только после успеха канал фиксируется как Assigned. <strong>Только назначить</strong> меняет лишь желаемое состояние.</p></div><div class="table-wrap"><table><thead><tr><th><input id="placement-select-all" type="checkbox"></th><th>Канал</th><th>Модель</th><th>Основной CDN</th><th>Фактически</th><th>Состояние</th></tr></thead><tbody id="placement-body"></tbody></table></div></section>
+        <section class="panel"><div class="panel-head"><div><h3>История миграций</h3><p class="muted small">Новые миграции v5.12 сохраняют полный снимок до переноса. Откат сначала показывает Dry Run.</p></div><button id="migration-history-refresh" class="btn ghost small">↻ Обновить</button></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Время</th><th>Целевой CDN</th><th>Каналов</th><th>Результат</th><th>Действия</th></tr></thead><tbody id="migration-history-body"></tbody></table></div></section>
       </section>
 
       <section id="sync-view" class="view-section hidden">
-        <div class="section-intro"><div><h2>Умная синхронизация</h2><p>В зеркальном режиме сравнение идёт со всеми серверами; в гибридном — только с назначенным CDN, а лишние копии показываются отдельно.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
+        <div class="section-intro"><div><h2>Умная синхронизация</h2><p id="sync-mode-copy">В зеркальном режиме сравнение идёт со всеми включёнными серверами.</p></div><button id="sync-refresh-btn" class="btn primary">↻ Сканировать</button></div>
         <section class="panel"><div class="panel-head"><div class="toolbar-left"><label class="search-box"><span>⌕</span><input id="sync-filter" placeholder="Поиск потока"></label><select id="sync-status-filter" class="select"><option value="all">Все</option><option value="drift">Только различия</option><option value="missing">Отсутствующие</option></select></div><div class="toolbar-right"><button id="sync-selected-btn" class="btn primary small" disabled>Синхронизировать выбранные</button><span id="sync-count" class="soft-badge">0</span></div></div><div class="table-wrap"><table><thead><tr><th><input id="sync-select-all" type="checkbox"></th><th>Поток</th><th>Состояние</th><th>Серверы</th></tr></thead><tbody id="sync-body"></tbody></table></div></section>
       </section>
 
@@ -304,6 +308,22 @@
       <section id="audit-view" class="view-section hidden">
         <div class="section-intro"><div><h2>История действий</h2><p>Кто, когда и что изменил в панели.</p></div><button id="audit-refresh-btn" class="btn ghost">↻ Обновить</button></div>
         <section class="panel"><div class="panel-head"><label class="search-box"><span>⌕</span><input id="audit-filter" placeholder="Действие, поток, пользователь"></label><span id="audit-count" class="soft-badge">0</span></div><div class="table-wrap"><table><thead><tr><th>Время</th><th>Пользователь</th><th>Действие</th><th>Объект</th><th>Результат</th><th>Описание</th></tr></thead><tbody id="audit-body"></tbody></table></div></section>
+      </section>
+
+      <section id="settings-view" class="view-section hidden">
+        <div class="section-intro"><div><h2>Настройки панели</h2><p>Выберите глобальную модель работы. Панель сразу адаптирует интерфейс и логику операций.</p></div></div>
+        <section class="panel panel-mode-settings">
+          <div class="panel-head"><div><p class="eyebrow">РЕЖИМ ПАНЕЛИ</p><h3>Зеркальный или Гибридный</h3></div><span id="settings-mode-status" class="soft-badge">—</span></div>
+          <div class="panel-mode-choices">
+            <button type="button" class="panel-mode-choice" data-panel-mode="mirror">
+              <span class="panel-mode-icon">▣</span><strong>Зеркальный</strong><small>Все каналы считаются общими для всех включённых CDN. Размещение и миграции скрыты.</small>
+            </button>
+            <button type="button" class="panel-mode-choice" data-panel-mode="hybrid">
+              <span class="panel-mode-icon">▦</span><strong>Гибридный</strong><small>Можно постепенно назначать каналы по CDN, мигрировать пачками, проверять и откатывать.</small>
+            </button>
+          </div>
+          <div class="callout panel-mode-note"><span>i</span><p><strong>Переключение не удаляет сохранённые назначения.</strong> В Зеркальном режиме они просто не применяются. При возврате в Гибридный режим сохранённые Assigned снова становятся активными.</p></div>
+        </section>
       </section>
 
       <section id="alerts-view" class="view-section hidden">
@@ -357,8 +377,8 @@
 http://example/1502
 #EXTINF:-1 ...,TVP 2 HD
 http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и остальные атрибуты игнорируются.</small></label>
-        <label class="field"><span>Модель размещения</span><select id="m3u-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
-        <label id="m3u-placement-server-field" class="field hidden"><span>Основной CDN</span><select id="m3u-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
+        <label id="m3u-placement-mode-field" class="field hybrid-only"><span>Модель размещения</span><select id="m3u-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
+        <label id="m3u-placement-server-field" class="field hidden hybrid-only"><span>Основной CDN</span><select id="m3u-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
         <label class="field"><span>Режим после импорта</span><select id="m3u-stream-mode" class="select"><option value="ondemand">On demand</option><option value="static">Static · постоянно</option></select><small>После импорта режим можно менять отдельно для любого канала.</small></label>
         <label class="switch-row full"><input id="m3u-overwrite-existing" type="checkbox"><span class="switch"></span><span><strong>Обновлять уже существующие потоки</strong><small>По умолчанию совпавшие системные имена безопасно пропускаются.</small></span></label>
         <div class="field full">
@@ -382,8 +402,8 @@ http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и
         <label class="field"><span>Позиция</span><input id="stream-position" type="number" min="0" placeholder="Автоматически"></label>
         <label class="switch-row"><input id="stream-static" type="checkbox"><span class="switch"></span><span><strong>Постоянный поток</strong><small>Выключено = ondemand</small></span></label>
         <div class="field full"><div class="field-title"><span>Источники input</span><button id="create-add-input" class="text-btn" type="button">＋ Добавить</button></div><div id="create-input-list" class="input-list"></div></div>
-        <label class="field"><span>Модель размещения</span><select id="stream-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
-        <label id="stream-placement-server-field" class="field hidden"><span>Основной CDN</span><select id="stream-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
+        <label id="stream-placement-mode-field" class="field hybrid-only"><span>Модель размещения</span><select id="stream-placement-mode" class="select"><option value="mirror">Зеркально на всех CDN</option><option value="assigned">Только назначенный CDN</option></select></label>
+        <label id="stream-placement-server-field" class="field hidden hybrid-only"><span>Основной CDN</span><select id="stream-placement-server" class="select"><option value="">Выберите сервер</option></select></label>
         <div id="stream-targets-field" class="field full"><span>Сохранить на серверах</span><div id="create-targets" class="target-list"></div></div>
       </div>
       <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Отмена</button><button id="stream-submit" type="submit" class="btn primary">Создать поток</button></footer>
@@ -439,6 +459,23 @@ http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и
   </dialog>
 
 
+
+  <dialog id="migration-plan-dialog" class="modal wide-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ПОШАГОВАЯ МИГРАЦИЯ</p><h2>План распределения каналов</h2><p class="muted">План ничего не меняет. Он только раскладывает оставшиеся зеркальные каналы по свободным местам CDN.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body"><div id="migration-plan-summary" class="dryrun-summary"></div><div id="migration-plan-body" class="migration-plan-list"></div></div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Закрыть</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="migration-verify-dialog" class="modal wide-modal dryrun-modal">
+    <div class="modal-card">
+      <header class="modal-head"><div><p class="eyebrow">ПОСТПРОВЕРКА МИГРАЦИИ</p><h2 id="migration-verify-title">Фактическое состояние CDN</h2><p class="muted">Проверка запускается только вручную и читает реальную конфигурацию на CDN. Никаких PUT/DELETE на этом этапе нет.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
+      <div class="modal-body"><div id="migration-verify-summary" class="dryrun-summary"></div><div id="migration-verify-body" class="dryrun-list"></div></div>
+      <footer class="modal-foot"><button type="button" class="btn ghost modal-close">Закрыть</button><span class="modal-spacer"></span><button id="migration-verify-rollback-btn" type="button" class="btn danger hidden">↶ Откатить миграцию</button></footer>
+    </div>
+  </dialog>
+
   <dialog id="dryrun-dialog" class="modal wide-modal dryrun-modal">
     <div class="modal-card">
       <header class="modal-head"><div><p class="eyebrow">ЦЕНТР ИЗМЕНЕНИЙ · DRY RUN</p><h2 id="dryrun-operation">Предпросмотр изменений</h2><p class="muted">На этом этапе панель только читает конфигурацию. PUT/DELETE и backup не выполняются.</p></div><button type="button" class="icon-btn modal-close">×</button></header>
@@ -458,6 +495,6 @@ http://example/1503" required></textarea><small>tvg-id, group-title, tvg-logo и
 
   <dialog id="diagnostics-dialog" class="modal wide-modal"><div class="modal-card"><header class="modal-head"><div><p class="eyebrow">ДИАГНОСТИКА</p><h2 id="diagnostics-title">Поток</h2></div><button type="button" class="icon-btn modal-close">×</button></header><div class="modal-body"><div id="diagnostics-summary" class="diagnostic-grid"></div><h3>Media info</h3><pre id="diagnostics-media" class="json-box"></pre><details><summary>Raw stats</summary><pre id="diagnostics-raw" class="json-box"></pre></details></div></div></dialog>
 
-  <script src="/static/app.js?v=510" defer></script>
+  <script src="/static/app.js?v=513" defer></script>
 </body>
 </html>

@@ -53,7 +53,7 @@ class FlussonicClient:
             "timeout": timeout,
             "follow_redirects": True,
             "limits": limits,
-            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.10.0"},
+            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.13.1"},
         }
         self._clients = {
             True: httpx.AsyncClient(verify=True, **common),

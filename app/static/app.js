@@ -37,6 +37,8 @@ const state = {
   m3uPreview: null,
   pendingChange: null,
   channelCard: null,
+  migrationPlan: null,
+  migrationHistory: [],
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -116,12 +118,17 @@ function replaceStreamInState(stream) {
   renderStreams();
 }
 
-function successfulResultForSelectedServer(result) {
-  return (result?.results || []).find(item => item.ok && item.server_id === state.selectedServerId) || null;
+function successfulResultForSelectedServer(result, streamName = null) {
+  const targetId = state.selectedServerId === 'all' ? serverIdForStream(streamName) : state.selectedServerId;
+  return (result?.results || []).find(item => item.ok && item.server_id === targetId) || (result?.results || []).find(item => item.ok) || null;
 }
 
 async function applyMutationResult(result, streamName, fallbackStream = null) {
-  const selectedResult = successfulResultForSelectedServer(result);
+  if (state.selectedServerId === 'all') {
+    await loadStreams();
+    return true;
+  }
+  const selectedResult = successfulResultForSelectedServer(result, streamName);
   if (!selectedResult) return false;
   const normalized = selectedResult.data?.normalized_stream;
   if (normalized?.name) {
@@ -163,6 +170,24 @@ function desiredTargetIds(stream = null) {
   const placement = streamPlacement(stream);
   if (state.placementEnabled && placement.configured_mode === 'assigned' && placement.primary_server_id) return [placement.primary_server_id];
   return state.servers.filter(server => server.enabled && server.online).map(server => server.id);
+}
+
+function serverIdForStream(name) {
+  if (state.selectedServerId && state.selectedServerId !== 'all') return state.selectedServerId;
+  const stream = state.streams.find(item => item.name === name);
+  if (!stream) return state.primaryId || state.servers.find(server => server.enabled)?.id || null;
+  const placement = streamPlacement(stream);
+  if (state.placementEnabled && placement.configured_mode === 'assigned' && placement.primary_server_id && (stream.server_ids || []).includes(placement.primary_server_id)) return placement.primary_server_id;
+  return stream.reference_server_id || (stream.server_ids || [])[0] || state.primaryId || null;
+}
+
+function streamServerSummary(stream) {
+  if (state.selectedServerId !== 'all') return '';
+  const names = stream.server_names || [];
+  const enabledCount = state.servers.filter(server => server.enabled).length;
+  if (!names.length) return ' · сервер не найден';
+  const compact = names.length <= 3 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+  return ` · CDN ${stream.server_count || names.length}/${enabledCount}: ${compact}`;
 }
 
 function fillPlacementServerSelect(select, selected = '') {
@@ -246,7 +271,7 @@ async function loadServers() {
     state.servers = data.items;
     state.primaryId = data.primary_id;
     const enabledIds = state.servers.filter(server => server.enabled).map(server => server.id);
-    if (!state.selectedServerId || !enabledIds.includes(state.selectedServerId)) {
+    if (!state.selectedServerId || (state.selectedServerId !== 'all' && !enabledIds.includes(state.selectedServerId))) {
       state.selectedServerId = state.primaryId || enabledIds[0] || null;
     }
     renderServerSelect();
@@ -263,10 +288,12 @@ async function loadServers() {
 function renderServerSelect() {
   const enabled = state.servers.filter(server => server.enabled);
   $('#server-select').disabled = enabled.length === 0;
-  $('#server-select').innerHTML = enabled.length ? enabled.map(server => `
-    <option value="${escapeHtml(server.id)}" ${server.id === state.selectedServerId ? 'selected' : ''}>
-      ${escapeHtml(server.name)}${server.primary ? ' · основной' : ''}${server.online ? '' : ' · offline'}
-    </option>`).join('') : '<option value="">Нет серверов</option>';
+  $('#server-select').innerHTML = enabled.length ? `
+    <option value="all" ${state.selectedServerId === 'all' ? 'selected' : ''}>ВСЕ · объединённый список</option>
+    ${enabled.map(server => `
+      <option value="${escapeHtml(server.id)}" ${server.id === state.selectedServerId ? 'selected' : ''}>
+        ${escapeHtml(server.name)}${server.primary ? ' · основной' : ''}${server.online ? '' : ' · offline'}
+      </option>`).join('')}` : '<option value="">Нет серверов</option>';
 }
 
 function renderServerCards() {
@@ -309,24 +336,28 @@ async function loadStreams() {
     $('#metric-total').textContent = '0';
     $('#metric-alive').textContent = '0';
     $('#metric-running').textContent = '0';
+    $('#metric-total-foot').textContent = 'нет выбранного сервера';
     $('#stream-count').textContent = '0 потоков';
-    body.innerHTML = '<tr class="loading-row"><td colspan="7">Добавьте и включите Flussonic-сервер в разделе «Серверы».</td></tr>';
+    body.innerHTML = '<tr class="loading-row"><td colspan="8">Добавьте и включите Flussonic-сервер в разделе «Серверы».</td></tr>';
     $('#empty-state').classList.add('hidden');
     return;
   }
-  body.innerHTML = '<tr class="loading-row"><td colspan="7">Загрузка потоков…</td></tr>';
+  body.innerHTML = `<tr class="loading-row"><td colspan="8">${state.selectedServerId === 'all' ? 'Собираю уникальные потоки со всех CDN…' : 'Загрузка потоков…'}</td></tr>`;
   $('#empty-state').classList.add('hidden');
   try {
     const data = await api(`/api/streams?server_id=${encodeURIComponent(state.selectedServerId || '')}`);
     state.streams = data.items;
     state.placementEnabled = Boolean(data.placement_enabled);
+    applyPanelModeUI();
     renderStreams();
     $('#metric-total').textContent = data.stats.total;
     $('#metric-alive').textContent = data.stats.alive;
     $('#metric-running').textContent = data.stats.running;
+    $('#metric-total-foot').textContent = state.selectedServerId === 'all' ? 'уникальных каналов на всех CDN' : 'на выбранном сервере';
     $('#last-refresh').textContent = `Обновлено ${new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
+    if ((data.errors || []).length) toast(`ВСЕ: ${data.errors.length} CDN недоступны, показаны данные с доступных серверов`, 'error', 6500);
   } catch (error) {
-    body.innerHTML = `<tr class="loading-row"><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
+    body.innerHTML = `<tr class="loading-row"><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
     toast(`Не удалось загрузить потоки: ${error.message}`, 'error');
   }
 }
@@ -354,10 +385,12 @@ function renderStreams() {
     const [statusClass, statusLabel] = formatStatus(stream);
     const initial = (stream.title || stream.name || '?').trim().charAt(0).toUpperCase();
     const inputIcons = (stream.inputs || []).slice(0, 3).map((_, i) => `<span class="input-dot">${i + 1}</span>`).join('');
-    return `<tr draggable="true" data-name="${escapeHtml(stream.name)}" class="${stream.disabled ? 'stream-disabled-row' : ''}">
+    const effectivePlacement = streamPlacement(stream).effective_mode === 'assigned';
+    const allView = state.selectedServerId === 'all';
+    return `<tr draggable="${allView ? 'false' : 'true'}" data-name="${escapeHtml(stream.name)}" class="${stream.disabled ? 'stream-disabled-row' : ''}">
       <td><input class="stream-select" type="checkbox" ${state.selectedStreams.has(stream.name) ? 'checked' : ''}></td>
-      <td><span class="drag-handle" title="Изменить порядок">⋮⋮</span></td>
-      <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')} · ${streamPlacement(stream).configured_mode === 'assigned' ? escapeHtml(streamPlacement(stream).primary_server_name || 'CDN не выбран') : 'зеркало'}</span></div></div></td>
+      <td><span class="drag-handle ${allView ? 'all-view' : ''}" title="${allView ? 'В режиме ВСЕ порядок меняется на конкретном сервере' : 'Изменить порядок'}">${allView ? '—' : '⋮⋮'}</span></td>
+      <td><div class="stream-cell"><div class="stream-logo">${escapeHtml(initial)}</div><div class="stream-name"><strong>${escapeHtml(stream.title || stream.name)}</strong><span>${escapeHtml(stream.name)} · ${escapeHtml(stream.provider || 'без provider')} · ${effectivePlacement ? escapeHtml(streamPlacement(stream).primary_server_name || 'CDN не выбран') : 'зеркало'}${escapeHtml(streamServerSummary(stream))}</span></div></div></td>
       <td><div class="input-stack">${inputIcons}<span class="input-count">${stream.inputs.length} input</span></div></td>
       <td><span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span></td>
       <td><div class="stream-mode-switch" aria-label="Режим потока">
@@ -398,6 +431,7 @@ function wireStreamRows() {
     });
     $('.edit-action', row)?.addEventListener('click', () => openStreamModal(name));
     $('.delete-action', row)?.addEventListener('click', () => openDelete(name));
+    if (state.selectedServerId === 'all') return;
     row.addEventListener('dragstart', event => {
       if (event.target.closest('button, input, select, a')) return event.preventDefault();
       state.draggedRow = row;
@@ -426,6 +460,7 @@ function wireStreamRows() {
 }
 
 async function saveStreamOrder() {
+  if (state.selectedServerId === 'all') return toast('В режиме «ВСЕ» порядок меняется только после выбора конкретного сервера', 'error');
   const rows = $$('#streams-body tr[data-name]');
   const visibleNames = rows.map(row => row.dataset.name);
   if (visibleNames.length !== state.streams.length) return toast('Для изменения порядка сбросьте поиск и фильтры', 'error');
@@ -450,7 +485,9 @@ async function saveStreamOrder() {
 }
 
 function updateM3UPlacementFields() {
-  const assigned = $('#m3u-placement-mode').value === 'assigned';
+  if (!state.placementEnabled) $('#m3u-placement-mode').value = 'mirror';
+  const assigned = state.placementEnabled && $('#m3u-placement-mode').value === 'assigned';
+  $('#m3u-placement-mode-field')?.classList.toggle('hidden', !state.placementEnabled);
   $('#m3u-placement-server-field').classList.toggle('hidden', !assigned);
 }
 
@@ -470,7 +507,7 @@ function openM3UImport() {
 
 function m3uImportPayload() {
   const content = $('#m3u-import-text').value.trim();
-  const placementMode = $('#m3u-placement-mode').value;
+  const placementMode = state.placementEnabled ? $('#m3u-placement-mode').value : 'mirror';
   const placementServerId = $('#m3u-placement-server').value;
   if (!content) throw new Error('Вставьте M3U список');
   if (placementMode === 'assigned' && !placementServerId) throw new Error('Выберите основной CDN');
@@ -563,8 +600,9 @@ async function saveStream(event) {
   if (!urls.length) return toast('Добавьте хотя бы один input', 'error');
   if (new Set(urls).size !== urls.length) return toast('Одинаковый input указан дважды', 'error');
   let targetIds = checkedTargets($('#create-targets'));
-  const placementMode = $('#stream-placement-mode').value;
-  const placementServerId = $('#stream-placement-server').value;
+  const savedPlacement = streamPlacement(state.currentStream);
+  const placementMode = state.placementEnabled ? $('#stream-placement-mode').value : (state.currentStream ? savedPlacement.configured_mode : 'mirror');
+  const placementServerId = placementMode === 'assigned' ? (state.placementEnabled ? $('#stream-placement-server').value : savedPlacement.primary_server_id) : null;
   if (placementMode === 'assigned') {
     if (!placementServerId) return toast('Выберите основной CDN', 'error');
     targetIds = [placementServerId];
@@ -580,8 +618,8 @@ async function saveStream(event) {
       position: $('#stream-position').value ? Number($('#stream-position').value) : (state.currentStream?.position ?? null),
       inputs: urls.map(url => ({ url })),
       target_ids: targetIds,
-      placement_mode: $('#stream-placement-mode').value,
-      placement_server_id: $('#stream-placement-mode').value === 'assigned' ? $('#stream-placement-server').value : null,
+      placement_mode: placementMode,
+      placement_server_id: placementServerId,
     };
 
     if (state.currentStream) {
@@ -720,7 +758,9 @@ async function deleteCurrentStream() {
     const query = targets.map(id => `target_id=${encodeURIComponent(id)}`).join('&');
     const result = await api(`/api/streams/${encodeURIComponent(state.currentStream.name)}?${query}`, { method: 'DELETE' });
     reportOperation(result, 'Поток удалён');
-    if ((result.results || []).some(item => item.ok && item.server_id === state.selectedServerId)) {
+    if (state.selectedServerId === 'all') {
+      await loadStreams();
+    } else if ((result.results || []).some(item => item.ok && item.server_id === state.selectedServerId)) {
       state.streams = state.streams.filter(item => item.name !== state.currentStream.name);
       refreshStreamMetrics();
       renderStreams();
@@ -1225,12 +1265,16 @@ function sortMonitorSessions(rows) {
 }
 
 function switchView(view) {
+  if (view === 'placement' && !state.placementEnabled) {
+    toast('Размещение доступно в Гибридном режиме. Переключите режим в Настройках.');
+    view = 'settings';
+  }
   state.currentView = view;
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
   $('#streams-view').classList.toggle('hidden', view !== 'streams');
   $('#servers-view').classList.toggle('hidden', view !== 'servers');
-  ['monitor','load','cluster','placement','sync','sources','backups','audit','alerts'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
-  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', placement: 'Размещение каналов', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления' };
+  ['monitor','load','cluster','placement','sync','sources','backups','audit','alerts','settings'].forEach(name => $(`#${name}-view`)?.classList.toggle('hidden', view !== name));
+  const titles = { streams: 'Потоки', servers: 'Серверы', monitor: 'Мониторинг', load: 'Нагрузка серверов', cluster: 'Cluster', placement: 'Размещение каналов', sync: 'Синхронизация', sources: 'Источники', backups: 'Резервные копии', audit: 'История действий', alerts: 'Уведомления', settings: 'Настройки' };
   $('#page-title').textContent = titles[view] || 'Панель';
   $('#add-stream-btn').classList.toggle('hidden', view !== 'streams');
   $('#import-m3u-btn').classList.toggle('hidden', view !== 'streams');
@@ -1238,7 +1282,7 @@ function switchView(view) {
   if (view === 'monitor') startMonitor();
   if (view === 'load') startLoadMonitor();
   if (view === 'cluster') startClusterMonitor();
-  if (view === 'placement') loadPlacementOverview();
+  if (view === 'placement') { loadPlacementOverview(); loadMigrationHistory(); }
   if (view === 'sync') loadSyncOverview();
   if (view === 'sources') loadSourceChecks();
   if (view === 'backups') loadBackups();
@@ -1464,7 +1508,9 @@ async function saveBulk(event) {
 
 const changeOperationLabels = {
   add_input: 'Добавить резервный input', set_provider: 'Изменить provider', set_on_play: 'Изменить on_play',
-  set_static: 'Изменить Static / On demand', set_disabled: 'Включить / отключить поток', delete: 'Удалить поток', sync: 'Синхронизировать'
+  set_static: 'Изменить Static / On demand', set_disabled: 'Включить / отключить поток', delete: 'Удалить поток', sync: 'Синхронизировать',
+  placement_migrate: 'Перенести каналы на выбранный CDN',
+  placement_rollback: 'Откатить миграцию и восстановить прежнее состояние'
 };
 
 function prettyChangeValue(value) {
@@ -1482,7 +1528,8 @@ function renderDryRun(data) {
     <article><span>Изменений</span><strong>${data.change_count}</strong></article>
     <article><span>Без изменений</span><strong>${data.unchanged_count}</strong></article>
     <article class="${data.failure_count ? 'danger-text' : ''}"><span>Ошибок</span><strong>${data.failure_count}</strong></article>`;
-  $('#dryrun-body').innerHTML = data.items.map(item => {
+  const warnings = (data.warnings || []).map(text => `<div class="callout warning"><span>!</span><p>${escapeHtml(text)}</p></div>`).join('');
+  $('#dryrun-body').innerHTML = warnings + data.items.map(item => {
     const status = !item.ok ? `<span class="status-pill error">Ошибка</span>` : item.changed ? `<span class="status-pill waiting">Изменится</span>` : `<span class="status-pill alive">Без изменений</span>`;
     const changes = item.changes?.length ? item.changes.map(change => `<div class="diff-line"><strong>${escapeHtml(change.field)}</strong><div><del>${escapeHtml(prettyChangeValue(change.before))}</del><span>→</span><ins>${escapeHtml(prettyChangeValue(change.after))}</ins></div></div>`).join('') : `<span class="muted">${escapeHtml(item.error || 'Конфигурация уже соответствует выбранному действию')}</span>`;
     return `<article class="dryrun-item ${item.ok ? '' : 'has-error'}"><header><div><strong>${escapeHtml(item.stream_name)}</strong><span>${escapeHtml(item.server_name)}</span></div>${status}</header>${changes}${item.note ? `<p class="muted small">${escapeHtml(item.note)}</p>` : ''}</article>`;
@@ -1533,7 +1580,8 @@ async function openChannelCard(name) {
   $('#channel-card-content').innerHTML = '<div class="loading-card">Собираю состояние канала со всех CDN…</div>';
   $('#channel-card-dialog').showModal();
   try {
-    const data = await api(`/api/channel-card/${encodeURIComponent(name)}?server_id=${encodeURIComponent(state.selectedServerId || '')}`);
+    const concreteServerId = serverIdForStream(name);
+    const data = await api(`/api/channel-card/${encodeURIComponent(name)}?server_id=${encodeURIComponent(concreteServerId || '')}`);
     state.channelCard = data;
     const stream = data.stream || {}; const summary = data.summary || {}; const placement = data.placement || {};
     const inputs = (stream.inputs || []).map((item, index) => `<div class="channel-input"><span>${index + 1}</span><code>${escapeHtml(item.url)}</code></div>`).join('') || '<span class="muted">Input не найден</span>';
@@ -1557,7 +1605,9 @@ async function openPreview(name) {
   $('#preview-frame').src = 'about:blank';
   $('#preview-dialog').showModal();
   try {
-    const data = await api(`/api/preview/${encodeURIComponent(name)}?server_id=${encodeURIComponent(state.selectedServerId)}`);
+    const concreteServerId = serverIdForStream(name);
+    if (!concreteServerId) throw new Error('Не найден CDN с этим потоком');
+    const data = await api(`/api/preview/${encodeURIComponent(name)}?server_id=${encodeURIComponent(concreteServerId)}`);
     $('#preview-frame').src = data.embed_url;
     $('#preview-hls').href = data.hls_url; $('#preview-llhls').href = data.ll_hls_url;
   } catch (error) { toast(error.message, 'error'); }
@@ -1567,7 +1617,9 @@ async function openDiagnostics(name) {
   $('#diagnostics-title').textContent = name; $('#diagnostics-summary').innerHTML = '<div class="loading-card">Загрузка…</div>';
   $('#diagnostics-dialog').showModal();
   try {
-    const d = await api(`/api/diagnostics/${encodeURIComponent(name)}?server_id=${encodeURIComponent(state.selectedServerId)}`);
+    const concreteServerId = serverIdForStream(name);
+    if (!concreteServerId) throw new Error('Не найден CDN с этим потоком');
+    const d = await api(`/api/diagnostics/${encodeURIComponent(name)}?server_id=${encodeURIComponent(concreteServerId)}`);
     const s = d.status || {};
     $('#diagnostics-summary').innerHTML = [
       ['Статус', s.status || 'unknown'], ['Alive', String(Boolean(s.alive))], ['Running', String(Boolean(s.running))],
@@ -1583,8 +1635,7 @@ async function loadPlacementSettings() {
   try {
     const data = await api('/api/placement/settings');
     state.placementEnabled = Boolean(data.enabled);
-    if ($('#placement-enabled')) $('#placement-enabled').checked = state.placementEnabled;
-    updatePlacementModeCopy();
+    applyPanelModeUI();
   } catch (_) {}
 }
 
@@ -1593,17 +1644,47 @@ function updatePlacementModeCopy() {
   if ($('#placement-mode-title')) $('#placement-mode-title').textContent = enabled ? 'Гибридная' : 'Зеркальная';
   if ($('#placement-mode-help')) $('#placement-mode-help').textContent = enabled
     ? 'Назначенные каналы работают на одном CDN; остальные продолжают зеркалироваться.'
-    : 'Все каналы должны быть на всех включённых серверах. Сохранённые назначения временно не применяются.';
+    : 'Все каналы работают по зеркальной модели. Сохранённые назначения не удалены, но временно не применяются.';
 }
 
-async function togglePlacementMode() {
-  const enabled = $('#placement-enabled').checked;
+function applyPanelModeUI() {
+  const hybrid = Boolean(state.placementEnabled);
+  document.body.dataset.panelMode = hybrid ? 'hybrid' : 'mirror';
+  if ($('#placement-enabled')) $('#placement-enabled').checked = hybrid;
+  updatePlacementModeCopy();
+  const placementNav = $('.nav-item[data-view="placement"]');
+  placementNav?.classList.toggle('hidden', !hybrid);
+  $$('.panel-mode-choice').forEach(button => button.classList.toggle('active', button.dataset.panelMode === (hybrid ? 'hybrid' : 'mirror')));
+  if ($('#settings-mode-status')) $('#settings-mode-status').textContent = hybrid ? 'Гибридный' : 'Зеркальный';
+  if ($('#panel-mode-badge')) {
+    $('#panel-mode-badge').textContent = hybrid ? 'Гибридный' : 'Зеркальный';
+    $('#panel-mode-badge').classList.toggle('hybrid', hybrid);
+  }
+  if ($('#sync-mode-copy')) $('#sync-mode-copy').textContent = hybrid
+    ? 'Гибридный режим: назначенные каналы сравниваются только с целевым CDN, лишние копии показываются отдельно.'
+    : 'Зеркальный режим: каждый канал сравнивается со всеми включёнными CDN.';
+  $('#stream-placement-mode-field')?.classList.toggle('hidden', !hybrid);
+  if (!hybrid) $('#stream-placement-server-field')?.classList.add('hidden');
+  $('#m3u-placement-mode-field')?.classList.toggle('hidden', !hybrid);
+  if (!hybrid) $('#m3u-placement-server-field')?.classList.add('hidden');
+}
+
+async function setPanelMode(mode) {
+  const enabled = mode === 'hybrid';
+  if (enabled === state.placementEnabled) return;
+  const warning = enabled
+    ? 'Включить Гибридный режим? Ранее сохранённые назначения Assigned сразу снова станут активными.'
+    : 'Переключить панель в Зеркальный режим? Назначения сохранятся, но временно перестанут применяться.';
+  if (!window.confirm(warning)) return;
   try {
     await api('/api/placement/settings', { method: 'PUT', body: JSON.stringify({ enabled }) });
-    state.placementEnabled = enabled; updatePlacementModeCopy();
-    toast(enabled ? 'Гибридное размещение включено' : 'Зеркальный режим включён');
-    await Promise.all([loadPlacementOverview(), loadStreams()]);
-  } catch (error) { $('#placement-enabled').checked = state.placementEnabled; toast(error.message, 'error'); }
+    state.placementEnabled = enabled;
+    applyPanelModeUI();
+    if (!enabled && state.currentView === 'placement') switchView('settings');
+    toast(enabled ? 'Гибридный режим включён' : 'Зеркальный режим включён');
+    await loadStreams();
+    if (enabled) await loadPlacementOverview();
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 async function loadPlacementOverview() {
@@ -1611,7 +1692,7 @@ async function loadPlacementOverview() {
   try {
     const data = await api('/api/placement/overview');
     state.placementEnabled = Boolean(data.enabled); state.placementItems = data.items || []; state.placementServerCounts = data.server_counts || []; state.placementSelected.clear();
-    $('#placement-enabled').checked = state.placementEnabled; updatePlacementModeCopy();
+    applyPanelModeUI();
     fillPlacementServerSelect($('#placement-server-select'));
     $('#placement-total').textContent = data.summary?.total ?? 0;
     $('#placement-assigned').textContent = data.summary?.assigned ?? 0;
@@ -1645,10 +1726,235 @@ function renderPlacementOverview() {
 function updatePlacementSelection() {
   const count = state.placementSelected.size;
   $('#placement-assign-btn').disabled = !count || !state.placementEnabled;
+  const migrateButton = $('#placement-migrate-btn');
+  migrateButton.disabled = !count || !$('#placement-server-select').value;
+  migrateButton.title = !count ? 'Сначала выберите каналы' : !$('#placement-server-select').value ? 'Выберите целевой CDN' : (!state.placementEnabled ? 'Dry Run доступен. Гибридный режим потребуется только при применении.' : 'Открыть Dry Run миграции');
   $('#placement-mirror-btn').disabled = !count;
   $('#placement-apply-btn').disabled = !count;
   const visible = $$('.placement-row-check');
   $('#placement-select-all').checked = visible.length > 0 && visible.every(box => box.checked);
+}
+
+async function openMigrationPlan() {
+  const batchSize = Math.max(1, Math.min(500, Number($('#placement-batch-size').value || 100)));
+  $('#placement-batch-size').value = batchSize;
+  $('#placement-plan-btn').textContent = `План ${batchSize}/CDN`;
+  $('#migration-plan-summary').innerHTML = '';
+  $('#migration-plan-body').innerHTML = '<div class="loading-card">Формирую безопасный план. Никакие назначения не меняются…</div>';
+  $('#migration-plan-dialog').showModal();
+  try {
+    const data = await api('/api/placement/plan', { method: 'POST', body: JSON.stringify({ batch_size: batchSize }) });
+    state.migrationPlan = data;
+    $('#migration-plan-summary').innerHTML = `
+      <article><span>Зеркальных кандидатов</span><strong>${data.candidate_count || 0}</strong></article>
+      <article><span>Запланировано</span><strong>${data.planned_count || 0}</strong></article>
+      <article><span>Не помещается</span><strong>${data.unplanned_count || 0}</strong></article>
+      <article><span>Лимит на CDN</span><strong>${data.batch_size || batchSize}</strong></article>`;
+    $('#migration-plan-body').innerHTML = (data.batches || []).map(batch => `
+      <article class="migration-plan-card ${batch.planned ? '' : 'empty'}" data-server-id="${escapeHtml(batch.server_id)}">
+        <header><div><strong>${escapeHtml(batch.server_name)}</strong><span>${batch.assigned_before} уже назначено · ${batch.planned} в плане</span></div><span class="status-pill ${batch.assigned_after >= batch.capacity ? 'waiting' : 'alive'}">${batch.assigned_after}/${batch.capacity}</span></header>
+        <div class="migration-plan-names">${batch.names.slice(0, 12).map(name => `<span>${escapeHtml(name)}</span>`).join('')}${batch.names.length > 12 ? `<span>+${batch.names.length - 12} ещё</span>` : ''}</div>
+        <footer><button class="btn primary small migration-use-batch" data-server-id="${escapeHtml(batch.server_id)}" ${batch.planned ? '' : 'disabled'}>Выбрать эту пачку</button></footer>
+      </article>`).join('') || '<div class="empty-state"><p>Нет CDN для планирования</p></div>';
+    $$('.migration-use-batch').forEach(button => button.addEventListener('click', () => useMigrationBatch(button.dataset.serverId)));
+  } catch (error) {
+    $('#migration-plan-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function useMigrationBatch(serverId) {
+  const batch = (state.migrationPlan?.batches || []).find(item => item.server_id === serverId);
+  if (!batch?.names?.length) return;
+  state.placementSelected = new Set(batch.names);
+  $('#placement-server-select').value = serverId;
+  $('#migration-plan-dialog').close();
+  renderPlacementOverview();
+  updatePlacementSelection();
+  toast(`Выбрано ${batch.names.length} каналов → ${batch.server_name}. Нажмите «Перенести сейчас» для Dry Run.`);
+}
+
+async function pickPlacementStreams() {
+  const count = Math.max(1, Math.min(500, Number($('#placement-pick-count').value || 100)));
+  const serverId = $('#placement-server-select').value;
+  $('#placement-pick-count').value = count;
+  $('#placement-pick-btn').textContent = `Выбрать ${count}`;
+  if (!serverId) return toast('Сначала выберите целевой CDN', 'error');
+  try {
+    const data = await api('/api/placement/pick', { method: 'POST', body: JSON.stringify({ count, server_id: serverId }) });
+    if (!data.selected_count) {
+      state.placementSelected.clear();
+      renderPlacementOverview();
+      return toast('Немигрированных каналов больше нет', 'error');
+    }
+    state.placementSelected = new Set(data.names || []);
+    renderPlacementOverview();
+    updatePlacementSelection();
+    const shortage = data.selected_count < data.requested_count ? ` Запрошено ${data.requested_count}, доступно только ${data.selected_count}.` : '';
+    toast(`Выбрано ${data.selected_count} каналов → ${data.server_name}. После миграции на CDN будет назначено ${data.assigned_after_if_applied}.${shortage}`);
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function migratePlacementNow() {
+  const names = [...state.placementSelected];
+  const serverId = $('#placement-server-select').value;
+  if (!names.length) return toast('Выберите каналы', 'error');
+  if (!serverId) return toast('Выберите целевой CDN', 'error');
+  const payload = { names, server_id: serverId };
+  $('#dryrun-body').innerHTML = '<div class="loading-card">Проверяю target CDN и копии на остальных серверах… Никакие изменения ещё не применяются.</div>';
+  $('#dryrun-summary').innerHTML = '';
+  $('#dryrun-operation').textContent = changeOperationLabels.placement_migrate;
+  $('#dryrun-apply-btn').disabled = true;
+  state.pendingChange = {
+    payload,
+    applyCallback: async () => {
+      if (!state.placementEnabled) {
+        const confirmed = confirm('Для реального переноса нужно включить гибридное распределение. Внимание: ранее сохранённые назначения тоже станут активными. Включить гибридный режим и продолжить?');
+        if (!confirmed) throw new Error('Миграция отменена: гибридный режим не включён');
+        await api('/api/placement/settings', { method: 'PUT', body: JSON.stringify({ enabled: true }) });
+        state.placementEnabled = true;
+        applyPanelModeUI();
+        updatePlacementSelection();
+        toast('Гибридное размещение включено');
+      }
+      const result = await api('/api/placement/migrate', { method: 'POST', body: JSON.stringify(payload) });
+      toast(result.ok ? `Перенесено: ${result.success_count}` : `Перенесено: ${result.success_count}, ошибок: ${result.failure_count}`, result.ok ? 'success' : 'error', 8000);
+      await Promise.all([loadPlacementOverview(), loadMigrationHistory(), loadSyncOverview(), loadStreams()]);
+    },
+  };
+  $('#dryrun-dialog').showModal();
+  try {
+    const data = await api('/api/placement/migrate/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+    state.pendingChange.preview = data;
+    renderDryRun(data);
+  } catch (error) {
+    $('#dryrun-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+    toast(`Dry Run миграции: ${error.message}`, 'error', 7000);
+  }
+}
+
+async function loadMigrationHistory() {
+  const body = $('#migration-history-body');
+  if (!body) return;
+  body.innerHTML = '<tr class="loading-row"><td colspan="6">Загрузка истории миграций…</td></tr>';
+  try {
+    const data = await api('/api/placement/migrations?limit=50');
+    state.migrationHistory = data.items || [];
+    body.innerHTML = state.migrationHistory.map(item => {
+      const result = item.result || {};
+      const rolled = Boolean(item.rolled_back_at);
+      const statusClass = item.status === 'success' ? 'alive' : item.status === 'failed' ? 'error' : 'waiting';
+      const statusText = item.status === 'success' ? `Успешно ${result.success_count ?? item.stream_count}` : item.status === 'failed' ? 'Ошибка' : item.status === 'running' ? 'Выполняется' : `Частично ${result.success_count ?? 0}/${item.stream_count}`;
+      const actions = rolled
+        ? `<span class="status-pill alive">Откат ${formatDate(item.rolled_back_at)}</span>`
+        : `<div class="row-actions"><button class="btn ghost small migration-verify-btn" data-id="${item.id}">✓ Проверить</button><button class="btn ghost small migration-rollback-btn" data-id="${item.id}">↶ Откатить</button></div>`;
+      return `<tr><td><strong>#${item.id}</strong></td><td>${formatDate(item.ts)}</td><td>${escapeHtml(item.target_server_name)}</td><td>${item.stream_count}</td><td><span class="status-pill ${statusClass}">${escapeHtml(statusText)}</span></td><td>${actions}</td></tr>`;
+    }).join('') || '<tr><td colspan="6" class="muted">Новых миграций пока нет</td></tr>';
+    $$('.migration-verify-btn').forEach(button => button.addEventListener('click', () => openMigrationVerify(Number(button.dataset.id))));
+    $$('.migration-rollback-btn').forEach(button => button.addEventListener('click', () => openMigrationRollback(Number(button.dataset.id))));
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+function migrationVerifyServerHtml(node) {
+  const cls = node.state === 'ok' ? 'alive' : node.state === 'extra' ? 'waiting' : node.state === 'missing' ? 'error' : 'waiting';
+  const icon = node.state === 'ok' ? '✓' : node.state === 'extra' ? '!' : node.state === 'missing' ? '×' : '?';
+  return `<div class="migration-verify-node"><strong>${escapeHtml(node.server_name)}</strong><span class="status-pill ${cls}">${icon} ${escapeHtml(node.label || node.state)}</span></div>`;
+}
+
+async function repairMigrationStream(name, serverId) {
+  const payload = { names: [name], server_id: serverId };
+  $('#migration-verify-dialog').close();
+  $('#dryrun-body').innerHTML = '<div class="loading-card">Проверяю канал перед исправлением… Никаких изменений ещё не применяется.</div>';
+  $('#dryrun-summary').innerHTML = '';
+  $('#dryrun-operation').textContent = 'Исправить размещение после миграции';
+  $('#dryrun-apply-btn').disabled = true;
+  state.pendingChange = {
+    payload,
+    applyCallback: async () => {
+      if (!state.placementEnabled) {
+        const confirmed = confirm('Для исправления нужно включить гибридное распределение. Включить его и продолжить?');
+        if (!confirmed) throw new Error('Исправление отменено');
+        await api('/api/placement/settings', { method: 'PUT', body: JSON.stringify({ enabled: true }) });
+        state.placementEnabled = true;
+        applyPanelModeUI();
+        updatePlacementSelection();
+      }
+      const result = await api('/api/placement/migrate', { method: 'POST', body: JSON.stringify(payload) });
+      toast(result.ok ? `${name}: размещение исправлено` : `${name}: ${result.failure_count} ошибок`, result.ok ? 'success' : 'error', 8000);
+      await Promise.all([loadPlacementOverview(), loadMigrationHistory(), loadSyncOverview(), loadStreams()]);
+    },
+  };
+  $('#dryrun-dialog').showModal();
+  try {
+    const data = await api('/api/placement/migrate/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+    state.pendingChange.preview = data;
+    renderDryRun(data);
+  } catch (error) {
+    $('#dryrun-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+    toast(`Проверка исправления: ${error.message}`, 'error', 8000);
+  }
+}
+
+async function openMigrationVerify(migrationId) {
+  const dialog = $('#migration-verify-dialog');
+  $('#migration-verify-title').textContent = `Миграция #${migrationId} · фактическое состояние`;
+  $('#migration-verify-summary').innerHTML = '';
+  $('#migration-verify-body').innerHTML = '<div class="loading-card">Читаю конфигурацию со всех CDN…</div>';
+  const rollbackButton = $('#migration-verify-rollback-btn');
+  rollbackButton.classList.add('hidden');
+  dialog.showModal();
+  try {
+    const data = await api(`/api/placement/migrations/${migrationId}/verify`, { method: 'POST', body: '{}' });
+    $('#migration-verify-summary').innerHTML = `
+      <article><span>Каналов</span><strong>${data.stream_count}</strong></article>
+      <article><span>Полностью OK</span><strong>${data.ok_count}</strong></article>
+      <article class="${data.warning_count ? 'warning-text' : ''}"><span>Предупреждения</span><strong>${data.warning_count}</strong></article>
+      <article class="${data.critical_count ? 'danger-text' : ''}"><span>Критично</span><strong>${data.critical_count}</strong></article>
+      <article><span>Проверок CDN</span><strong>${data.server_checks}</strong></article>`;
+    $('#migration-verify-body').innerHTML = data.items.map(item => {
+      const status = item.status === 'ok'
+        ? '<span class="status-pill alive">✓ Корректно</span>'
+        : item.status === 'critical'
+          ? '<span class="status-pill error">Критическая ошибка</span>'
+          : '<span class="status-pill waiting">Требует внимания</span>';
+      const reasons = (item.reasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('');
+      const fix = item.status === 'ok' ? '' : `<button class="btn ghost small migration-fix-btn" data-name="${escapeHtml(item.stream_name)}" data-server-id="${escapeHtml(item.target_server_id)}">Исправить</button>`;
+      return `<article class="dryrun-item ${item.status === 'critical' ? 'has-error' : ''}"><header><div><strong>${escapeHtml(item.stream_name)}</strong><span>ожидается: ${escapeHtml(item.target_server_name)}</span></div><div class="row-actions">${status}${fix}<button class="btn ghost small migration-card-btn" data-name="${escapeHtml(item.stream_name)}">Карточка</button></div></header><div class="migration-verify-grid">${(item.servers || []).map(migrationVerifyServerHtml).join('')}</div>${reasons ? `<ul class="migration-verify-reasons">${reasons}</ul>` : '<p class="muted small">Фактическое состояние полностью соответствует миграции.</p>'}</article>`;
+    }).join('') || '<div class="empty-state"><p>В миграции нет каналов</p></div>';
+    $$('.migration-card-btn').forEach(button => button.addEventListener('click', () => { dialog.close(); openChannelCard(button.dataset.name); }));
+    $$('.migration-fix-btn').forEach(button => button.addEventListener('click', () => repairMigrationStream(button.dataset.name, button.dataset.serverId)));
+    rollbackButton.classList.remove('hidden');
+    rollbackButton.onclick = () => { dialog.close(); openMigrationRollback(migrationId); };
+    toast(data.ok ? `Миграция #${migrationId}: всё соответствует` : `Миграция #${migrationId}: найдено проблем ${data.warning_count + data.critical_count}`, data.ok ? 'success' : 'error', 7000);
+  } catch (error) {
+    $('#migration-verify-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+    toast(`Постпроверка миграции: ${error.message}`, 'error', 8000);
+  }
+}
+
+async function openMigrationRollback(migrationId) {
+  $('#dryrun-body').innerHTML = '<div class="loading-card">Сравниваю текущее состояние со снимком до миграции… Ничего не меняется.</div>';
+  $('#dryrun-summary').innerHTML = '';
+  $('#dryrun-operation').textContent = changeOperationLabels.placement_rollback;
+  $('#dryrun-apply-btn').disabled = true;
+  state.pendingChange = {
+    payload: { migration_id: migrationId },
+    applyCallback: async () => {
+      const result = await api(`/api/placement/migrations/${migrationId}/rollback`, { method: 'POST', body: '{}' });
+      toast(result.ok ? `Миграция #${migrationId} откатана: ${result.success_count} каналов` : `Откат #${migrationId}: ${result.success_count} успешно, ${result.failure_count} ошибок`, result.ok ? 'success' : 'error', 9000);
+      await Promise.all([loadMigrationHistory(), loadPlacementOverview(), loadSyncOverview(), loadStreams()]);
+    },
+  };
+  $('#dryrun-dialog').showModal();
+  try {
+    const data = await api(`/api/placement/migrations/${migrationId}/rollback/dry-run`, { method: 'POST', body: '{}' });
+    state.pendingChange.preview = data;
+    renderDryRun(data);
+  } catch (error) {
+    $('#dryrun-body').innerHTML = `<div class="callout danger"><span>!</span><p>${escapeHtml(error.message)}</p></div>`;
+    toast(`Dry Run отката: ${error.message}`, 'error', 8000);
+  }
 }
 
 async function assignPlacement(mode) {
@@ -2008,6 +2314,7 @@ $('#refresh-btn').addEventListener('click', async () => {
   else if (state.currentView === 'backups') await loadBackups();
   else if (state.currentView === 'audit') await loadAudit();
   else if (state.currentView === 'alerts') await loadAlerts();
+  else if (state.currentView === 'settings') await loadPlacementSettings();
   else { await loadServers(); if (state.currentView === 'streams') await loadStreams(); }
   toast('Данные обновлены');
 });
@@ -2048,7 +2355,7 @@ $('#bulk-static-btn').addEventListener('click', event => setStreamsMode([...stat
 $('#bulk-disable-btn').addEventListener('click', event => setStreamsDisabled([...state.selectedStreams], true, event.currentTarget));
 $('#bulk-enable-btn').addEventListener('click', event => setStreamsDisabled([...state.selectedStreams], false, event.currentTarget));
 $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEventListener('submit', saveBulk); $('#bulk-operation').addEventListener('change', updateBulkValueField);
-$('#placement-enabled').addEventListener('change', togglePlacementMode); $('#placement-refresh-btn').addEventListener('click', loadPlacementOverview); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
+$$('.panel-mode-choice').forEach(button => button.addEventListener('click', () => setPanelMode(button.dataset.panelMode))); $('#placement-open-settings')?.addEventListener('click', () => switchView('settings')); $('#placement-refresh-btn').addEventListener('click', () => { loadPlacementOverview(); loadMigrationHistory(); }); $('#migration-history-refresh').addEventListener('click', loadMigrationHistory); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-plan-btn').addEventListener('click', openMigrationPlan); $('#placement-batch-size').addEventListener('input', event => { const size=Math.max(1,Math.min(500,Number(event.target.value||100))); $('#placement-plan-btn').textContent=`План ${size}/CDN`; }); $('#placement-server-select').addEventListener('change', updatePlacementSelection); $('#placement-pick-btn').addEventListener('click', pickPlacementStreams); $('#placement-pick-count').addEventListener('input', event => { const size=Math.max(1,Math.min(500,Number(event.target.value||100))); $('#placement-pick-btn').textContent=`Выбрать ${size}`; }); $('#placement-migrate-btn').addEventListener('click', migratePlacementNow); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
 $('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);
 $('#sync-refresh-btn').addEventListener('click', loadSyncOverview); $('#sync-filter').addEventListener('input', renderSyncOverview); $('#sync-status-filter').addEventListener('change', renderSyncOverview); $('#sync-selected-btn').addEventListener('click', syncSelected); $('#sync-select-all').addEventListener('change',e=>{$$('.sync-row-check').forEach(c=>c.checked=e.target.checked);updateSyncSelection();});
 $('#sources-run-btn').addEventListener('click', runSourceChecks); $('#sources-filter').addEventListener('input', renderSourceChecks); $('#sources-status-filter').addEventListener('change', renderSourceChecks); $('#source-action-form').addEventListener('submit', saveSourceAction); $('#source-action-type').addEventListener('change', updateSourceActionFields);

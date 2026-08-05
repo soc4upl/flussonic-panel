@@ -382,6 +382,21 @@ class PlacementApplyRequest(BaseModel):
     remove_extras: bool = False
 
 
+class PlacementPlanRequest(BaseModel):
+    batch_size: int = Field(default=100, ge=1, le=500)
+    server_ids: list[str] | None = Field(default=None, max_length=100)
+
+
+class PlacementTargetPickRequest(BaseModel):
+    count: int = Field(default=100, ge=1, le=500)
+    server_id: str = Field(min_length=1, max_length=64)
+
+
+class PlacementMigrationRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=500)
+    server_id: str = Field(min_length=1, max_length=64)
+
+
 class ClusterPeerItem(BaseModel):
     server_id: str = Field(min_length=1, max_length=64)
     host: str = Field(min_length=1, max_length=255)

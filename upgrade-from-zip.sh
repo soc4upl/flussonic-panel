@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ARCHIVE="${1:-/root/flussonic-panel-v5.10.zip}"
+ARCHIVE="${1:-/root/flussonic-panel-v5.13.1.zip}"
 TARGET="${2:-/root/flussonic-panel}"
-TMP="$(mktemp -d /tmp/flussonic-panel-v510.XXXXXX)"
-ENV_BACKUP="/root/flussonic-panel.env.v510.backup"
+TMP="$(mktemp -d /tmp/flussonic-panel-v5131.XXXXXX)"
+ENV_BACKUP="/root/flussonic-panel.env.v5131.backup"
 trap 'rm -rf "$TMP"' EXIT
 
 [[ -f "$ARCHIVE" ]] || { echo "Архив не найден: $ARCHIVE" >&2; exit 1; }
@@ -14,7 +14,7 @@ trap 'rm -rf "$TMP"' EXIT
 unzip -q -o "$ARCHIVE" -d "$TMP"
 SOURCE="$TMP/flussonic-panel"
 [[ -f "$SOURCE/app/main.py" ]] || { echo "В архиве нет app/main.py" >&2; exit 1; }
-grep -q '5.10.0' "$SOURCE/app/main.py" || { echo "Архив не содержит v5.10.0" >&2; exit 1; }
+grep -q '5.13.1' "$SOURCE/app/main.py" || { echo "Архив не содержит v5.13.1" >&2; exit 1; }
 
 cp "$TARGET/.env" "$ENV_BACKUP"
 docker rm -f flussonic-panel >/dev/null 2>&1 || true

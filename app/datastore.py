@@ -108,6 +108,21 @@ class DataStore:
               updated_by TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_stream_placements_server ON stream_placements(primary_server_id);
+            CREATE TABLE IF NOT EXISTS migration_batches (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts INTEGER NOT NULL,
+              actor TEXT NOT NULL,
+              target_server_id TEXT NOT NULL,
+              target_server_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              stream_count INTEGER NOT NULL,
+              snapshot_json TEXT NOT NULL,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              rolled_back_at INTEGER,
+              rolled_back_by TEXT,
+              rollback_result_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_migration_batches_ts ON migration_batches(ts DESC);
             """)
 
     def backup(self, *, actor: str, action: str, stream_name: str, server_id: str, server_name: str, config: dict[str, Any], config_hash: str) -> int:
@@ -315,6 +330,37 @@ class DataStore:
     def delete_placement(self, stream_name: str) -> None:
         with self._lock, self._connect() as db:
             db.execute("DELETE FROM stream_placements WHERE stream_name=?", (stream_name,))
+
+    def create_migration_batch(self, *, actor: str, target_server_id: str, target_server_name: str, snapshot: dict[str, Any]) -> int:
+        with self._lock, self._connect() as db:
+            cur = db.execute(
+                "INSERT INTO migration_batches(ts,actor,target_server_id,target_server_name,status,stream_count,snapshot_json) VALUES(?,?,?,?,?,?,?)",
+                (int(time.time()), actor, target_server_id, target_server_name, "running", len(snapshot.get("streams") or {}), json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))),
+            )
+            return int(cur.lastrowid)
+
+    def finish_migration_batch(self, batch_id: int, *, status: str, result: dict[str, Any]) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE migration_batches SET status=?, result_json=? WHERE id=?", (status, json.dumps(result, ensure_ascii=False, separators=(",", ":")), batch_id))
+
+    def migration_batches(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT id,ts,actor,target_server_id,target_server_name,status,stream_count,result_json,rolled_back_at,rolled_back_by,rollback_result_json FROM migration_batches ORDER BY ts DESC,id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) | {"result": json.loads(row["result_json"] or "{}"), "rollback_result": json.loads(row["rollback_result_json"] or "{}")} for row in rows]
+
+    def migration_batch(self, batch_id: int) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM migration_batches WHERE id=?", (batch_id,)).fetchone()
+        if row is None:
+            return None
+        return dict(row) | {"snapshot": json.loads(row["snapshot_json"] or "{}"), "result": json.loads(row["result_json"] or "{}"), "rollback_result": json.loads(row["rollback_result_json"] or "{}")}
+
+    def mark_migration_rollback(self, batch_id: int, *, actor: str, result: dict[str, Any], complete: bool) -> None:
+        with self._lock, self._connect() as db:
+            if complete:
+                db.execute("UPDATE migration_batches SET rolled_back_at=?, rolled_back_by=?, rollback_result_json=? WHERE id=?", (int(time.time()), actor, json.dumps(result, ensure_ascii=False, separators=(",", ":")), batch_id))
+            else:
+                db.execute("UPDATE migration_batches SET rollback_result_json=? WHERE id=?", (json.dumps(result, ensure_ascii=False, separators=(",", ":")), batch_id))
 
     def notification(self, level: str, event_type: str, message: str, delivered: bool, error: str | None = None) -> None:
         with self._lock, self._connect() as db:
