@@ -53,7 +53,7 @@ class FlussonicClient:
             "timeout": timeout,
             "follow_redirects": True,
             "limits": limits,
-            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.13.1"},
+            "headers": {"Accept": "application/json", "User-Agent": "Cyrius-Stream-Control/5.13.5"},
         }
         self._clients = {
             True: httpx.AsyncClient(verify=True, **common),
@@ -265,7 +265,7 @@ class FlussonicClient:
             "on_play": (config.get("on_play") or stream.get("on_play") or {}).get("url")
             if isinstance(config.get("on_play") or stream.get("on_play"), dict)
             else None,
-            "status": stats.get("status", "unknown"),
+            "status": stats.get("status") or stream.get("status") or "unknown",
             "running": bool(stats.get("running", False)),
             "alive": bool(stats.get("alive", False)),
             "named_by": stream.get("named_by"),
@@ -344,6 +344,11 @@ class FlussonicClient:
             return value
 
         normalized = clean(dict(config))
+        # Flussonic 23 treats missing `static` as the default static=true and
+        # commonly omits the key from config_on_disk. Canonicalize that form so
+        # `static: true` and an absent key compare as the same persistent config.
+        if "static" not in normalized:
+            normalized["static"] = True
         on_play = normalized.get("on_play")
         if isinstance(on_play, str):
             normalized["on_play"] = {"url": on_play}

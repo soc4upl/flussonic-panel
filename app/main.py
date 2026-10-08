@@ -21,6 +21,7 @@ from .monitor import SessionsMonitor
 from .load_monitor import ServerLoadMonitor
 from .notifications import NotificationService
 from .source_monitor import SourceMonitor
+from .stream_status_monitor import StreamStatusMonitor
 from .server_store import ServerStore, ServerStoreError
 from .cluster_store import ClusterStore, ClusterStoreError
 from .m3u_import import parse_m3u
@@ -45,17 +46,18 @@ notifications = NotificationService(data_store, settings.secret_key)
 monitor = SessionsMonitor(settings, server_store, data_store)
 source_monitor = SourceMonitor(settings, server_store, client, data_store, notifications)
 load_monitor = ServerLoadMonitor(settings, server_store, client, data_store, notifications, monitor)
+stream_status_monitor = StreamStatusMonitor(server_store, client, data_store, notifications)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await monitor.start(); await source_monitor.start(); await load_monitor.start()
+    await monitor.start(); await source_monitor.start(); await load_monitor.start(); await stream_status_monitor.start()
     try: yield
     finally:
-        await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
+        await stream_status_monitor.stop(); await load_monitor.stop(); await source_monitor.stop(); await monitor.stop(); await client.aclose()
 
 
-app = FastAPI(title=settings.panel_title, version="5.13.1", lifespan=lifespan)
+app = FastAPI(title=settings.panel_title, version="5.13.5", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -172,7 +174,7 @@ async def mutate_with_backup(targets: list[FlussonicServer], name: str, actor: s
 async def index() -> FileResponse: return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]: return {"ok": True, "version": "5.13.1", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual"}
+async def health() -> dict[str, Any]: return {"ok": True, "version": "5.13.5", "configured_servers": len(server_store.all()), "enabled_servers": len(server_store.enabled()), "server_load_monitor": settings.server_load_enabled, "node_exporter": True, "network_realtime": True, "cluster": True, "placement": True, "source_checks": "manual", "stream_status_alerts": True}
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
@@ -1539,7 +1541,7 @@ async def set_stream_mode(payload: StreamModeBulkRequest, session: Session = Dep
     """Switch selected streams between ondemand and static on their effective placement targets.
 
     Missing streams are never created by this operation: each target is read first,
-    backed up, and only then patched with the static flag. This is important while
+    backed up, rewritten from full config_on_disk, and then verified from disk. This is important while
     migrating from mirrored to assigned placement.
     """
     semaphore = asyncio.Semaphore(8)
@@ -1569,7 +1571,27 @@ async def set_stream_mode(payload: StreamModeBulkRequest, session: Session = Dep
                     config=config,
                     config_hash=client.config_hash(config),
                 )
-                data = await client.put_stream(server, name, {"static": payload.static})
+                # Flussonic 23 can accept a short {"static": ...} update at runtime
+                # without reliably persisting that mode across a streamer restart.
+                # Re-submit the complete config_on_disk and then prove that the
+                # persisted disk configuration contains the requested mode.
+                desired = dict(config)
+                desired["static"] = payload.static
+                body = dict(desired)
+                body.pop("name", None)
+                data = await client.put_stream(server, name, body)
+                check = await client.get_stream(server, name)
+                persisted = dict(client.disk_config(check))
+                if bool(persisted.get("static", True)) != payload.static:
+                    raise FlussonicError(
+                        "Flussonic принял изменение, но config_on_disk.static не сохранился"
+                    )
+                # Also protect the rest of the stream configuration from an
+                # accidental destructive partial update.
+                if client.config_hash(persisted) != client.config_hash(desired):
+                    raise FlussonicError(
+                        "Проверка config_on_disk после смены Static / On demand не прошла"
+                    )
                 return {
                     "server_id": server.id,
                     "server_name": server.name,
@@ -1577,6 +1599,7 @@ async def set_stream_mode(payload: StreamModeBulkRequest, session: Session = Dep
                     "ok": True,
                     "static": payload.static,
                     "changed": True,
+                    "persisted": True,
                     "data": data,
                 }
             except Exception as exc:
@@ -1762,8 +1785,18 @@ async def bulk(payload:BulkOperationRequest,session:Session=Depends(require_sess
                         body={"inputs":inputs}
                     elif payload.operation=="set_provider": body={"provider":str(payload.value or "")}
                     elif payload.operation=="set_on_play": body={"on_play":{"url":str(payload.value)}} if payload.value else {"on_play":None}
-                    elif payload.operation=="set_static": body={"static":bool(payload.value)}
+                    elif payload.operation=="set_static":
+                        # Keep the legacy bulk dialog safe on Flussonic 23 too:
+                        # write the whole disk config, not a runtime-sized patch.
+                        desired=dict(cfg); desired["static"]=bool(payload.value)
+                        body=dict(desired); body.pop("name",None)
                     data=await client.put_stream(server,name,body)
+                    if payload.operation=="set_static":
+                        check=await client.get_stream(server,name); persisted=dict(client.disk_config(check))
+                        if bool(persisted.get("static",True))!=bool(payload.value):
+                            raise FlussonicError("config_on_disk.static не сохранился")
+                        if client.config_hash(persisted)!=client.config_hash(desired):
+                            raise FlussonicError("Проверка config_on_disk после массовой смены режима не прошла")
                 return {"server_id":server.id,"server_name":server.name,"stream_name":name,"ok":True,"data":data}
             except Exception as exc: return {"server_id":server.id,"server_name":server.name,"stream_name":name,"ok":False,"error":str(exc)}
     if payload.operation=="sync" and placement_enabled():
@@ -1873,6 +1906,10 @@ async def save_notification_settings(payload:NotificationSettingsUpdate,session:
 
 @app.post("/api/notifications/test")
 async def test_notification(payload:NotificationTestRequest,_:Session=Depends(require_session))->dict[str,Any]: return {"ok":await notifications.send("test",payload.message,"info",force=True)}
+
+@app.post("/api/notifications/stream-status/check")
+async def check_stream_status_now(_:Session=Depends(require_session))->dict[str,Any]:
+    return await stream_status_monitor.refresh_now()
 
 @app.get("/api/notifications")
 async def notification_log(_:Session=Depends(require_session))->dict[str,Any]: return {"items":data_store.notification_items()}

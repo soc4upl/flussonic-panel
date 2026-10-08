@@ -21,7 +21,9 @@ class NotificationService:
             "telegram_chat_id": raw.get("telegram_chat_id", ""),
             "telegram_token_set": bool(raw.get("telegram_bot_token_enc")),
             "webhook_url_set": bool(raw.get("webhook_url_enc")),
-            "events": raw.get("events", ["source_failed", "server_offline", "sync_drift", "server_load"]),
+            "events": raw.get("events", ["source_failed", "server_offline", "sync_drift", "server_load", "stream_error", "stream_recovered"]),
+            "stream_status_poll_seconds": max(15, min(3600, int(raw.get("stream_status_poll_seconds", 30) or 30))),
+            "stream_status_confirmations": max(1, min(5, int(raw.get("stream_status_confirmations", 2) or 2))),
         }
 
     def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -30,6 +32,8 @@ class NotificationService:
             "enabled": bool(payload.get("enabled", False)),
             "telegram_chat_id": str(payload.get("telegram_chat_id", "")).strip(),
             "events": payload.get("events") or ["source_failed", "server_offline", "sync_drift", "server_load"],
+            "stream_status_poll_seconds": max(15, min(3600, int(payload.get("stream_status_poll_seconds", old.get("stream_status_poll_seconds", 30)) or 30))),
+            "stream_status_confirmations": max(1, min(5, int(payload.get("stream_status_confirmations", old.get("stream_status_confirmations", 2)) or 2))),
             "telegram_bot_token_enc": old.get("telegram_bot_token_enc"),
             "webhook_url_enc": old.get("webhook_url_enc"),
         }
@@ -43,6 +47,15 @@ class NotificationService:
             raw["webhook_url_enc"] = None
         self.store.set_setting("notifications", raw)
         return self.public_settings()
+
+    def status_monitor_settings(self) -> dict[str, Any]:
+        raw = self.store.get_setting("notifications", {}) or {}
+        events = raw.get("events") or []
+        return {
+            "active": bool(raw.get("enabled")) and bool({"stream_error", "stream_recovered"} & set(events)),
+            "poll_seconds": max(15, min(3600, int(raw.get("stream_status_poll_seconds", 30) or 30))),
+            "confirmations": max(1, min(5, int(raw.get("stream_status_confirmations", 2) or 2))),
+        }
 
     def _decrypt(self, value: str | None) -> str | None:
         if not value:

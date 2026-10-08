@@ -23,7 +23,7 @@ class SourceMonitor:
         self._lock = asyncio.Lock()
         self._server_state: dict[str, bool] = {}
         limits = httpx.Limits(max_connections=max(20, settings.source_check_concurrency * 2), max_keepalive_connections=20)
-        headers = {"User-Agent": "Cyrius-Source-Check/5.13.1"}
+        headers = {"User-Agent": "Cyrius-Source-Check/5.13.5"}
         self._http = {
             True: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=True, follow_redirects=True, limits=limits, headers=headers),
             False: httpx.AsyncClient(timeout=settings.source_check_timeout, verify=False, follow_redirects=True, limits=limits, headers=headers),
@@ -140,14 +140,18 @@ class SourceMonitor:
             errors = []
             removed_stale = 0
             enabled = list(self.servers.enabled())
-            primary = self.servers.primary()
             if server_id:
                 selected = self.servers.get(server_id)
                 source_servers = [selected] if selected and selected.enabled else []
             else:
-                source_servers = enabled if self.settings.source_check_all_servers else ([primary] if primary else [])
+                # Source checks are manual-only. When the operator presses
+                # "Проверить все сейчас", inspect every enabled CDN instead of
+                # silently falling back to the primary server. A row-level check
+                # still supplies server_id and remains scoped to one CDN.
+                source_servers = enabled
 
-            # Cheap server health check for every node; source probes are primary-only by default.
+            # Cheap server health check for every node. Source URL probes only run
+            # after an explicit authenticated manual request.
             for server in enabled:
                 status = await self.client.server_status(server)
                 online = bool(status.get("online"))

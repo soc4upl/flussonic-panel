@@ -16,6 +16,7 @@ const state = {
   selectedStreams: new Set(),
   syncItems: [],
   sourceItems: [],
+  sourceServerId: 'all',
   sourceActionItem: null,
   backupItems: [],
   auditItems: [],
@@ -275,6 +276,7 @@ async function loadServers() {
       state.selectedServerId = state.primaryId || enabledIds[0] || null;
     }
     renderServerSelect();
+    renderSourceServerSelect();
     renderServerCards();
     const enabled = state.servers.filter(server => server.enabled);
     const online = enabled.filter(server => server.online).length;
@@ -294,6 +296,19 @@ function renderServerSelect() {
       <option value="${escapeHtml(server.id)}" ${server.id === state.selectedServerId ? 'selected' : ''}>
         ${escapeHtml(server.name)}${server.primary ? ' · основной' : ''}${server.online ? '' : ' · offline'}
       </option>`).join('')}` : '<option value="">Нет серверов</option>';
+}
+
+function renderSourceServerSelect() {
+  const select = $('#sources-server-filter');
+  if (!select) return;
+  const enabled = state.servers.filter(server => server.enabled);
+  if (state.sourceServerId !== 'all' && !enabled.some(server => server.id === state.sourceServerId)) state.sourceServerId = 'all';
+  select.disabled = enabled.length === 0;
+  select.innerHTML = enabled.length ? `
+    <option value="all" ${state.sourceServerId === 'all' ? 'selected' : ''}>ВСЕ серверы</option>
+    ${enabled.map(server => `<option value="${escapeHtml(server.id)}" ${server.id === state.sourceServerId ? 'selected' : ''}>${escapeHtml(server.name)}${server.primary ? ' · основной' : ''}${server.online ? '' : ' · offline'}</option>`).join('')}` : '<option value="all">Нет серверов</option>';
+  const button = $('#sources-run-btn');
+  if (button && !button.disabled) button.textContent = state.sourceServerId === 'all' ? '▶ Проверить все сейчас' : `▶ Проверить ${state.servers.find(server => server.id === state.sourceServerId)?.name || 'сервер'}`;
 }
 
 function renderServerCards() {
@@ -2053,14 +2068,17 @@ function renderSourceChecks() {
     if (status === 'unsupported') return item.state === 'unsupported';
     return true;
   };
+  const selectedServerId = state.sourceServerId || 'all';
+  const matchesServer = item => selectedServerId === 'all' || item.server_id === selectedServerId;
   const items = state.sourceItems.filter(x => {
     const matchesSearch = !q || [x.server_name, x.stream_name, x.input_url, x.detail].join(' ').toLowerCase().includes(q);
-    return matchesSearch && matchesStatus(x);
+    return matchesServer(x) && matchesSearch && matchesStatus(x);
   });
-  const failedItems = state.sourceItems.filter(x => x.state === 'failed');
+  const visibleItems = state.sourceItems.filter(matchesServer);
+  const failedItems = visibleItems.filter(x => x.state === 'failed');
   const failedStreams = new Set(failedItems.map(x => `${x.server_id || x.server_name}::${x.stream_name}`));
-  $('#sources-total').textContent = state.sourceItems.length;
-  $('#sources-ok').textContent = state.sourceItems.filter(isHealthy).length;
+  $('#sources-total').textContent = visibleItems.length;
+  $('#sources-ok').textContent = visibleItems.filter(isHealthy).length;
   $('#sources-failed').textContent = failedItems.length;
   $('#sources-problem-streams').textContent = `Проблемных потоков: ${failedStreams.size}`;
   $('#sources-count').textContent = status === 'all' && !q ? `${items.length}` : `Показано: ${items.length}`;
@@ -2083,7 +2101,10 @@ async function runSourceChecks() {
   const b = $('#sources-run-btn');
   setBusy(b, true, 'Проверка…');
   try {
-    const r = await api('/api/source-checks/run', { method: 'POST' });
+    const query = new URLSearchParams();
+    if (state.sourceServerId && state.sourceServerId !== 'all') query.set('server_id', state.sourceServerId);
+    const endpoint = `/api/source-checks/run${query.toString() ? `?${query.toString()}` : ''}`;
+    const r = await api(endpoint, { method: 'POST' });
     const removed = Number(r.removed_stale || 0);
     const cleanupText = removed ? `, удалено устаревших записей ${removed}` : '';
     toast(`Проверено ${r.checked}, ошибок ${r.failed}${cleanupText}`, r.failed ? 'error' : 'success');
@@ -2282,10 +2303,11 @@ async function restoreBackup(id){const item=state.backupItems.find(x=>String(x.i
 async function loadAudit(){try{const d=await api('/api/audit?limit=700');state.auditItems=d.items||[];renderAudit();}catch(e){toast(e.message,'error');}}
 function renderAudit(){const q=($('#audit-filter').value||'').toLowerCase();const items=state.auditItems.filter(x=>!q||[x.actor,x.action,x.entity_id,x.summary].join(' ').toLowerCase().includes(q));$('#audit-count').textContent=items.length;$('#audit-body').innerHTML=items.map(x=>`<tr><td>${formatDate(x.ts)}</td><td>${escapeHtml(x.actor)}</td><td class="mono">${escapeHtml(x.action)}</td><td>${escapeHtml(x.entity_id||'—')}</td><td><span class="status-pill ${x.status==='success'?'alive':x.status==='partial'?'waiting':''}">${escapeHtml(x.status)}</span></td><td>${escapeHtml(x.summary)}</td></tr>`).join('')||emptyRow(6);}
 
-async function loadAlerts(){try{const [s,l]=await Promise.all([api('/api/notifications/settings'),api('/api/notifications')]);$('#alerts-enabled').checked=s.enabled;$('#alerts-chat-id').value=s.telegram_chat_id||'';$$('#alerts-form .event-checks input').forEach(c=>c.checked=(s.events||[]).includes(c.value));state.alertItems=l.items||[];renderAlerts();}catch(e){toast(e.message,'error');}}
+async function loadAlerts(){try{const [s,l]=await Promise.all([api('/api/notifications/settings'),api('/api/notifications')]);$('#alerts-enabled').checked=s.enabled;$('#alerts-chat-id').value=s.telegram_chat_id||'';$('#alerts-stream-poll').value=s.stream_status_poll_seconds||30;$('#alerts-stream-confirmations').value=s.stream_status_confirmations||2;$$('#alerts-form .event-checks input').forEach(c=>c.checked=(s.events||[]).includes(c.value));state.alertItems=l.items||[];renderAlerts();}catch(e){toast(e.message,'error');}}
 function renderAlerts(){ $('#alerts-count').textContent=state.alertItems.length;$('#alerts-body').innerHTML=state.alertItems.map(x=>`<tr><td>${formatDate(x.ts)}</td><td>${escapeHtml(x.event_type)}</td><td>${escapeHtml(x.message)}</td><td><span class="status-pill ${x.delivered?'alive':''}">${x.delivered?'Доставлено':'Ошибка'}</span>${x.error?`<span class="cell-sub danger-text">${escapeHtml(x.error)}</span>`:''}</td></tr>`).join('')||emptyRow(4); }
-async function saveAlerts(e){e.preventDefault();const b=$('#alerts-form button[type="submit"]');setBusy(b,true);try{await api('/api/notifications/settings',{method:'PUT',body:JSON.stringify({enabled:$('#alerts-enabled').checked,telegram_chat_id:$('#alerts-chat-id').value.trim(),telegram_bot_token:$('#alerts-token').value.trim()||null,webhook_url:$('#alerts-webhook').value.trim()||null,events:$$('#alerts-form .event-checks input:checked').map(x=>x.value)})});$('#alerts-token').value='';$('#alerts-webhook').value='';toast('Настройки сохранены');}catch(e){toast(e.message,'error');}finally{setBusy(b,false);}}
+async function saveAlerts(e){e.preventDefault();const b=$('#alerts-form button[type="submit"]');setBusy(b,true);try{await api('/api/notifications/settings',{method:'PUT',body:JSON.stringify({enabled:$('#alerts-enabled').checked,telegram_chat_id:$('#alerts-chat-id').value.trim(),telegram_bot_token:$('#alerts-token').value.trim()||null,webhook_url:$('#alerts-webhook').value.trim()||null,events:$$('#alerts-form .event-checks input:checked').map(x=>x.value),stream_status_poll_seconds:Number($('#alerts-stream-poll').value||30),stream_status_confirmations:Number($('#alerts-stream-confirmations').value||2)})});$('#alerts-token').value='';$('#alerts-webhook').value='';toast('Настройки сохранены');}catch(e){toast(e.message,'error');}finally{setBusy(b,false);}}
 async function testAlert(){try{const r=await api('/api/notifications/test',{method:'POST',body:JSON.stringify({message:'✅ Тест Cyrius Stream Control v5'})});toast(r.ok?'Тест доставлен':'Канал доставки не настроен',r.ok?'success':'error');await loadAlerts();}catch(e){toast(e.message,'error');}}
+async function checkStreamStatusAlerts(){const b=$('#alerts-stream-check-btn');setBusy(b,true);try{const r=await api('/api/notifications/stream-status/check',{method:'POST'});toast(`Проверено ${r.checked||0}; error/offline: ${r.bad||0}; уведомлений: ${r.alerts_delivered||0}`,r.bad?'error':'success');await loadAlerts();}catch(e){toast(e.message,'error');}finally{setBusy(b,false);}}
 
 async function loadMonitorHistory(range){try{const d=await api(`/api/monitor/history?range=${range}`);state.monitorHistory=(d.items||[]).map(x=>({ts:x.ts,total:x.sessions,counts:Object.fromEntries((x.server_counts||[]).map(s=>[s.server_id,s.sessions]))}));drawMonitorChart();$('#monitor-chart-info').textContent=`История ${range}: ${state.monitorHistory.length} точек`;}catch(e){toast(e.message,'error');}}
 $('#login-form').addEventListener('submit', async event => {
@@ -2358,10 +2380,10 @@ $('#bulk-open-btn').addEventListener('click', openBulk); $('#bulk-form').addEven
 $$('.panel-mode-choice').forEach(button => button.addEventListener('click', () => setPanelMode(button.dataset.panelMode))); $('#placement-open-settings')?.addEventListener('click', () => switchView('settings')); $('#placement-refresh-btn').addEventListener('click', () => { loadPlacementOverview(); loadMigrationHistory(); }); $('#migration-history-refresh').addEventListener('click', loadMigrationHistory); $('#placement-filter').addEventListener('input', renderPlacementOverview); $('#placement-status-filter').addEventListener('change', renderPlacementOverview); $('#placement-plan-btn').addEventListener('click', openMigrationPlan); $('#placement-batch-size').addEventListener('input', event => { const size=Math.max(1,Math.min(500,Number(event.target.value||100))); $('#placement-plan-btn').textContent=`План ${size}/CDN`; }); $('#placement-server-select').addEventListener('change', updatePlacementSelection); $('#placement-pick-btn').addEventListener('click', pickPlacementStreams); $('#placement-pick-count').addEventListener('input', event => { const size=Math.max(1,Math.min(500,Number(event.target.value||100))); $('#placement-pick-btn').textContent=`Выбрать ${size}`; }); $('#placement-migrate-btn').addEventListener('click', migratePlacementNow); $('#placement-assign-btn').addEventListener('click', () => assignPlacement('assigned')); $('#placement-mirror-btn').addEventListener('click', () => assignPlacement('mirror')); $('#placement-apply-btn').addEventListener('click', applyPlacement); $('#placement-select-all').addEventListener('change', event => { $$('.placement-row-check').forEach(box => { box.checked=event.target.checked; const name=box.closest('tr').dataset.name; event.target.checked ? state.placementSelected.add(name) : state.placementSelected.delete(name); }); updatePlacementSelection(); }); $('#stream-placement-mode').addEventListener('change', updateStreamPlacementFields); $('#stream-placement-server').addEventListener('change', updateStreamPlacementFields);
 $('#cluster-refresh-btn').addEventListener('click', () => loadClusterOverview(true)); $('#cluster-settings-btn').addEventListener('click', openClusterSettings); $('#cluster-config-btn').addEventListener('click', toggleClusterConfig); $('#cluster-form').addEventListener('submit', saveClusterSettings);
 $('#sync-refresh-btn').addEventListener('click', loadSyncOverview); $('#sync-filter').addEventListener('input', renderSyncOverview); $('#sync-status-filter').addEventListener('change', renderSyncOverview); $('#sync-selected-btn').addEventListener('click', syncSelected); $('#sync-select-all').addEventListener('change',e=>{$$('.sync-row-check').forEach(c=>c.checked=e.target.checked);updateSyncSelection();});
-$('#sources-run-btn').addEventListener('click', runSourceChecks); $('#sources-filter').addEventListener('input', renderSourceChecks); $('#sources-status-filter').addEventListener('change', renderSourceChecks); $('#source-action-form').addEventListener('submit', saveSourceAction); $('#source-action-type').addEventListener('change', updateSourceActionFields);
+$('#sources-run-btn').addEventListener('click', runSourceChecks); $('#sources-filter').addEventListener('input', renderSourceChecks); $('#sources-status-filter').addEventListener('change', renderSourceChecks); $('#sources-server-filter').addEventListener('change', event => { state.sourceServerId = event.target.value || 'all'; renderSourceServerSelect(); renderSourceChecks(); }); $('#source-action-form').addEventListener('submit', saveSourceAction); $('#source-action-type').addEventListener('change', updateSourceActionFields);
 $('#backups-refresh-btn').addEventListener('click', loadBackups); $('#backups-filter').addEventListener('input', renderBackups);
 $('#audit-refresh-btn').addEventListener('click', loadAudit); $('#audit-filter').addEventListener('input', renderAudit);
-$('#alerts-form').addEventListener('submit', saveAlerts); $('#alerts-test-btn').addEventListener('click', testAlert);
+$('#alerts-form').addEventListener('submit', saveAlerts); $('#alerts-test-btn').addEventListener('click', testAlert); $('#alerts-stream-check-btn').addEventListener('click', checkStreamStatusAlerts);
 $$('.range-btn').forEach(b=>b.addEventListener('click',()=>{$$('.range-btn').forEach(x=>x.classList.toggle('active',x===b));state.monitorRange=b.dataset.range;if(state.monitorRange==='live'){state.monitorHistory=[];if(state.monitorPayload)renderMonitor(state.monitorPayload,true);}else loadMonitorHistory(state.monitorRange);}));
 $$('.load-range-btn').forEach(button => button.addEventListener('click', () => {
   $$('.load-range-btn').forEach(item => item.classList.toggle('active', item === button));

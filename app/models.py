@@ -350,7 +350,9 @@ class NotificationSettingsUpdate(BaseModel):
     webhook_url: str | None = None
     clear_telegram: bool = False
     clear_webhook: bool = False
-    events: list[str] = Field(default_factory=lambda: ["source_failed", "server_offline", "sync_drift", "server_load"])
+    events: list[str] = Field(default_factory=lambda: ["source_failed", "server_offline", "sync_drift", "server_load", "stream_error", "stream_recovered"])
+    stream_status_poll_seconds: int = Field(default=30, ge=15, le=3600)
+    stream_status_confirmations: int = Field(default=2, ge=1, le=5)
 
 
 class NotificationTestRequest(BaseModel):

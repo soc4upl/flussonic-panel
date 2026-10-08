@@ -1,4 +1,27 @@
-# Cyrius Stream Control v5.13.1
+# Cyrius Stream Control v5.13.5
+
+## Новое в v5.13.5
+
+В «Источники» добавлен фильтр `ВСЕ серверы / CDN`. Кнопка ручной проверки теперь следует выбранному серверу; при `ВСЕ` проверяются все включённые CDN. Фоновая проверка источников не включается.
+
+## Новое в v5.13.5
+
+### Hotfix Flussonic 23: Static / On demand переживает restart
+
+- Массовые кнопки `Static` / `On demand` больше не отправляют короткий `{"static": ...}` payload.
+- Панель читает полный `config_on_disk`, меняет только поле `static` и отправляет полный сохранённый конфиг обратно.
+- После PUT панель обязательно делает повторный GET и проверяет `config_on_disk.static`.
+- Дополнительно сравнивается остальная конфигурация, чтобы при смене режима не потерялись inputs/title/provider/on_play и другие поля.
+- Если Flussonic принял запрос, но не сохранил режим на диск, операция возвращает ошибку и не считается успешной.
+- Та же защита добавлена в старое окно `Массовые операции → set_static`.
+
+### Из v5.13.2: Telegram при `error/offline`
+
+- Фоновая проверка использует только Flussonic `/streamer/api/v3/streams`; `ffprobe` и открытие input/source URL не используются.
+- Событие `Поток error / offline` отправляется один раз при переходе в ошибку.
+- Событие `Поток восстановлен` отправляется после выхода из ошибки.
+- `ondemand waiting` и `disabled` не считаются аварией.
+- В Гибридном режиме Assigned-поток проверяется только на назначенном CDN.
 
 Тёмная админ-панель для управления несколькими Flussonic Media Server.
 
@@ -125,16 +148,16 @@
 
 ## Обновление с предыдущей версии без rsync
 
-Архив загрузите как `/root/flussonic-panel-v5.13.1.zip`, затем запустите поставляемый скрипт:
+Архив загрузите как `/root/flussonic-panel-v5.13.5.zip`, затем запустите поставляемый скрипт:
 
 ```bash
-rm -rf /tmp/flussonic-panel-v5131-installer
-mkdir -p /tmp/flussonic-panel-v5131-installer
-unzip -q -o /root/flussonic-panel-v5.13.1.zip -d /tmp/flussonic-panel-v5131-installer
-bash /tmp/flussonic-panel-v5131-installer/flussonic-panel/upgrade-from-zip.sh
+rm -rf /tmp/flussonic-panel-v5135-installer
+mkdir -p /tmp/flussonic-panel-v5135-installer
+unzip -q -o /root/flussonic-panel-v5.13.5.zip -d /tmp/flussonic-panel-v5135-installer
+bash /tmp/flussonic-panel-v5135-installer/flussonic-panel/upgrade-from-zip.sh
 ```
 
-Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v5131` и оставляет Docker volume `flussonic-panel-data` без изменений.
+Скрипт сохраняет `.git` и `.env`, не использует `rsync`, пересобирает отдельный образ `flussonic-panel:v5135` и оставляет Docker volume `flussonic-panel-data` без изменений.
 
 Не удаляйте volume и не меняйте `PANEL_SECRET_KEY`.
 
@@ -147,13 +170,13 @@ curl -s http://127.0.0.1:8088/api/health
 Ожидается:
 
 ```json
-{"ok":true,"version":"5.13.1","cluster":true,"placement":true}
+{"ok":true,"version":"5.13.5","cluster":true,"placement":true}
 ```
 
 Откройте:
 
 ```text
-http://IP_ПАНЕЛИ:8088/?v=5130
+http://IP_ПАНЕЛИ:8088/?v=5134
 ```
 
 ## Настройка Cluster
